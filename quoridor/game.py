@@ -1,6 +1,7 @@
 import numpy as np
 from collections import deque
 
+
 BOARD_SIZE = 9
 FENCE_GRID = BOARD_SIZE - 1 # 8x8 grid
 
@@ -233,3 +234,7 @@ class QuoridorState:
     def __repr__(self):
         p = "P0" if self.turn == 0 else "P1"
         return f"QuoridorState(turn={p}, walls={list(self.walls_left)}, done={self.done})"
+    
+    def __str__(self):
+        from quoridor.display import render
+        return render(self)
