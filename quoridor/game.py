@@ -188,30 +188,37 @@ class QuoridorState:
         grid[row, col] = False
         return paths_ok
 
-    def _has_path(self, player):
-        """BFS check that a player can still reach their goal row.
-        WE SHOULD TRY TO OPTIMIZE THIS IF POSSIBLE
+    def shortest_path(self, player):
+        """BFS shortest distance from a player's position to their goal row.
+        Returns int distance, or float('inf') if no path exists.
         """
         start = (int(self.pos[player, 0]), int(self.pos[player, 1]))
         goal = int(self.goals[player])
 
+        if start[0] == goal:
+            return 0
+
         visited = set()
         visited.add(start)
-        queue = deque([start])
+        queue = deque([(start[0], start[1], 0)])
 
         while queue:
-            cr, cc = queue.popleft()
-            if cr == goal:
-                return True
+            cr, cc, dist = queue.popleft()
             for dr, dc in self.DIRECTIONS:
                 nr, nc = cr + dr, cc + dc
                 if (self._in_bounds(nr, nc)
                         and (nr, nc) not in visited
                         and not self._blocked(cr, cc, nr, nc)):
+                    if nr == goal:
+                        return dist + 1
                     visited.add((nr, nc))
-                    queue.append((nr, nc))
+                    queue.append((nr, nc, dist + 1))
 
-        return False
+        return float("inf")
+
+    def _has_path(self, player):
+        """Whether a player can reach their goal row."""
+        return self.shortest_path(player) < float("inf")
     
     # WALL COLISIONS
 
