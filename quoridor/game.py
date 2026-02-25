@@ -123,7 +123,7 @@ class QuoridorState:
         self.switch_turn()
         return False
 
-# FENCE PLACEMENT
+    # FENCE PLACEMENT
 
     def place_fence(self, row, col, orientation):
         """
@@ -219,6 +219,10 @@ class QuoridorState:
     def _has_path(self, player):
         """Whether a player can reach their goal row."""
         return self.shortest_path(player) < float("inf")
+    
+    def fences_count(self):
+        """Total number of fences on the board."""
+        return int(self.h_walls.sum() + self.v_walls.sum())
     
     # WALL COLISIONS
 

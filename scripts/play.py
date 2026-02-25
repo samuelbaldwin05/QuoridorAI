@@ -1,5 +1,3 @@
-"""Two-player Quoridor in the terminal."""
-
 from quoridor.game import QuoridorState
 from quoridor.display import render
 
