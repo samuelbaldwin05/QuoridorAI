@@ -1,0 +1,11 @@
+# virtual environment
+.venv/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
