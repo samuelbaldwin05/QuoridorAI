@@ -36,6 +36,6 @@ quoridor/
 ├── agents/              # AI agents (random, minimax, RL)
 ├── tests/               # unit tests
 ├── scripts/             # runnable entry points (play, benchmark)
-├── docs/                # proposal, summary
+├── plan/                # proposal, summary, research
 └── pyproject.toml
 ```
