@@ -242,6 +242,110 @@ class QuoridorState:
         # stepping left is the reverse
         return self._blocked(row2, col2, row1, col1)
 
+    # OBSERVATION AND LEGAL MASK
+
+    def get_observation(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Encode the current state as a (spatial, scalars) pair for the neural network.
+
+        Returns
+        -------
+        spatial : np.ndarray, shape (4, 9, 9), dtype float32
+            Four 9×9 channels describing the board (see channel layout below).
+        scalars : np.ndarray, shape (2,), dtype float32
+            Normalised wall counts: [current_player_walls / 10, opponent_walls / 10].
+
+        Channel layout
+        --------------
+        ch0 : current player pawn position (single 1.0)
+        ch1 : opponent pawn position (single 1.0)
+        ch2 : horizontal wall grid (8×8 in top-left of 9×9, rest 0)
+        ch3 : vertical wall grid  (8×8 in top-left of 9×9, rest 0)
+
+        Perspective normalisation
+        -------------------------
+        The board is always shown from the current player's POV with their goal
+        at row 0.  Player 0 already moves toward row 0, so no flip is needed.
+        Player 1's turn flips the board vertically so their pawn appears at the
+        bottom and the goal stays at the top.  This makes the observation
+        semantically identical from either player's perspective.
+        """
+        current = self.turn
+        opponent = 1 - current
+        flip = (current == 1)
+
+        spatial = np.zeros((4, 9, 9), dtype=np.float32)  # (4, 9, 9)
+
+        cur_r, cur_c = int(self.pos[current, 0]), int(self.pos[current, 1])
+        opp_r, opp_c = int(self.pos[opponent, 0]), int(self.pos[opponent, 1])
+        if flip:
+            # Flip row coordinates: row i → row 8-i
+            cur_r = 8 - cur_r
+            opp_r = 8 - opp_r
+
+        spatial[0, cur_r, cur_c] = 1.0  # current player pawn
+        spatial[1, opp_r, opp_c] = 1.0  # opponent pawn
+
+        h = self.h_walls.astype(np.float32)  # (8, 8)
+        v = self.v_walls.astype(np.float32)  # (8, 8)
+        if flip:
+            # Flip wall grids vertically so they align with the flipped pawn positions
+            h = np.flipud(h)
+            v = np.flipud(v)
+        spatial[2, :8, :8] = h  # embed 8×8 in top-left of 9×9
+        spatial[3, :8, :8] = v
+
+        scalars = np.array([
+            self.walls_left[current] / 10.0,
+            self.walls_left[opponent] / 10.0,
+        ], dtype=np.float32)  # (2,)
+
+        return spatial, scalars
+
+    def get_legal_mask(self) -> np.ndarray:
+        """
+        Build a boolean mask over the full 137-action space.
+
+        Returns
+        -------
+        mask : np.ndarray, shape (137,), dtype bool
+            mask[i] is True iff action i is currently legal for the active player.
+
+        Pawn moves (indices 0–7) are derived from get_valid_moves() by collapsing
+        each destination to its direction sign, then looking up DELTA_TO_INDEX.
+        This handles both 1-step and 2-step straight jumps (same sign) and
+        diagonal jumps (exact ±1 diagonal sign).
+
+        Wall actions (indices 8–135) are True iff _fence_ok() passes.
+        Pass (index 136) is always False — pass is never legal in standard Quoridor.
+        """
+        # Local import avoids a circular dependency at module load time.
+        # action_encoding imports nothing from game.py, so this is safe.
+        from quoridor.action_encoding import (
+            NUM_ACTIONS, FENCE_GRID as _FG, DELTA_TO_INDEX,
+            H_WALL_OFFSET, V_WALL_OFFSET,
+        )
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
+
+        cur_r, cur_c = int(self.pos[self.turn, 0]), int(self.pos[self.turn, 1])
+        for dest_r, dest_c in self.get_valid_moves():
+            dr, dc = dest_r - cur_r, dest_c - cur_c
+            # Collapse to direction sign so 1-step and 2-step straight jumps
+            # both map to the same cardinal action index.
+            normalized = (int(np.sign(dr)), int(np.sign(dc)))
+            if normalized in DELTA_TO_INDEX:
+                mask[DELTA_TO_INDEX[normalized]] = True
+
+        for r in range(_FG):
+            for c in range(_FG):
+                if self._fence_ok(r, c, "h"):
+                    mask[H_WALL_OFFSET + r * _FG + c] = True
+                if self._fence_ok(r, c, "v"):
+                    mask[V_WALL_OFFSET + r * _FG + c] = True
+
+        # index 136 (pass) stays False — pass is always illegal
+        return mask
+
     def __repr__(self):
         p = "P0" if self.turn == 0 else "P1"
         return f"QuoridorState(turn={p}, walls={list(self.walls_left)}, done={self.done})"
