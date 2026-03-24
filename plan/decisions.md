@@ -138,19 +138,23 @@ Apply this masking inside the network's `forward()` call so it is impossible to 
 
 ## 5. DQN Variant
 
-**Decision:** Vanilla DQN (experience replay + target network). No prioritized replay,
-no dueling, no double DQN for the initial implementation.
+**Decision:** ~~Vanilla DQN~~ → **Double DQN** (upgraded after first training run).
 
-**Why:**
+**Why vanilla first:**
 The team's primary goal in this phase is understanding how DQN works, not maximizing
-performance. Each extension (Double DQN, Dueling, PER) solves a specific identified
-problem. We should encounter those problems first, understand them, and then apply
-the fix — not import solutions to problems we have not yet seen.
+performance. Each extension solves a specific identified problem. We should encounter
+those problems first, understand them, and then apply the fix.
 
-**Extension path if needed:**
+**Why Double DQN now:**
+The first training run (25k steps) produced Q-values peaking at ~1.5 — exceeding the
+theoretical maximum of 1.0. This is the textbook signature of vanilla DQN's
+maximization bias: using the same network to both *select* and *evaluate* the best
+next action inflates Q-value estimates. Double DQN decouples these two operations
+(online net selects, target net evaluates), eliminating the bias in 3 lines of code.
+
+**Extension path going forward:**
 ```
-Vanilla DQN
-  --> if Q-values diverge or plateau: add Double DQN (minor code change)
+Double DQN  ✅ active
   --> if convergence is unstable: add Dueling architecture
   --> if sample efficiency is the bottleneck: add Prioritized Experience Replay
 ```
@@ -323,3 +327,44 @@ wrapper, which scans `get_valid_moves()` for any legal destination in the given 
 
 *Decisions recorded: March 17, 2026*
 *Based on team interview and code review session*
+
+---
+
+## 14. Extra Constants Added to config.py
+
+**Decision:** Added `NUM_CHANNELS = 4` and `NUM_SCALARS = 2` beyond the original spec.
+
+**Why:**
+`dqn_model.py` needs these values to define its input layer sizes (`Conv2d(NUM_CHANNELS, ...)` and
+`_FC_IN_SIZE = CONV2_FILTERS * BOARD_SIZE * BOARD_SIZE + NUM_SCALARS`). Hardcoding `4` and `2`
+directly in the model would be magic numbers. Keeping them in `config.py` ensures they stay in sync
+with the state representation documented in CLAUDE.md and `get_observation()`.
+
+*Decision recorded: March 23, 2026*
+
+---
+
+## 15. PyTorch Upgrade Required (2.1.2 → 2.11.0)
+
+**Decision:** Upgraded PyTorch from 2.1.2 to 2.11.0 to fix a NumPy compatibility issue.
+
+**What happened:**
+The original environment had PyTorch 2.1.2 (compiled against NumPy 1.x) alongside NumPy 2.2.6.
+Both `torch.from_numpy(array)` and `torch.tensor(numpy_array)` raised `RuntimeError` at runtime
+because PyTorch could not read NumPy 2.x dtype objects.
+
+**Fix:**
+```
+pip install --upgrade torch
+```
+Installed PyTorch 2.11.0 which supports NumPy 2.x.
+
+**Side effect:**
+`torchvision 0.16.2` now reports a version conflict (it requires torch==2.1.2). This is harmless
+because torchvision is not used anywhere in this project.
+
+**What to watch for:**
+If a future team member installs torchvision for any reason, they should upgrade it to a version
+compatible with torch 2.11.0 at the same time.
+
+*Decision recorded: March 23, 2026*

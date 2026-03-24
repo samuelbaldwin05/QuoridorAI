@@ -14,9 +14,9 @@ using the handoff notes at the bottom of each module.
 
 ```
 Stage 1: Infrastructure   (action encoding, observation, legal mask, Gym wrapper)  ✅ COMPLETE
-Stage 2: DQN Core         (neural network, replay buffer, config)                  ← START HERE
-Stage 3: Training Loop    (train script, W&B logging, checkpointing)
-Stage 4: Evaluation       (win rate tracking, tuning, handoff docs)
+Stage 2: DQN Core         (neural network, replay buffer, config)                  ✅ COMPLETE
+Stage 3: Training Loop    (train script, W&B logging, checkpointing)               ✅ COMPLETE
+Stage 4: Evaluation       (win rate tracking, tuning, handoff docs)                ← START HERE
 ```
 
 ---

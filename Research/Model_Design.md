@@ -170,11 +170,14 @@ Scalars [w1, w2] -->  Dense layer -->  32-dim vector  -----------------+
 On each turn a player can move their pawn or place a wall.
 
 ```
-5    pawn moves  (up, down, left, right, plus jump over adjacent opponent)
+8    pawn moves  (up, down, left, right + 4 diagonal jumps)
+         Cardinals cover normal 1-step moves AND straight 2-step jumps (same direction delta).
+         Diagonals are only legal when a straight jump is wall-blocked.
 64   horizontal wall placements  (8 rows of edges x 8 column positions)
 64   vertical wall placements    (same logic rotated)
+1    pass action  (reserved, always illegal)
 ---
-133  total discrete actions
+137  total discrete actions
 ```
 
 This is significantly larger than most classic RL benchmarks, which typically have fewer than
@@ -191,7 +194,7 @@ At any given turn, many of those 133 actions are illegal. Two options:
 
 **Chosen: Action Masking**
 
-Always output 133 probabilities. Before selecting an action, set illegal action logits to
+Always output 137 Q-values. Before selecting an action, set illegal action logits to
 negative infinity. After softmax, illegal actions have probability zero. Simple to implement
 and compatible with all downstream algorithms.
 
@@ -208,14 +211,20 @@ higher-level strategic concepts.
 ```
 Input (4, 9, 9)
       |
-Conv Layer 1 --> detects: walls near pawns, open cells, adjacency
+Conv Layer 1 (32 filters, 3x3, padding=1) --> detects: walls near pawns, open cells, adjacency
       |
-Conv Layer 2 --> detects: corridors, blocked paths, pawn proximity to goal
+Conv Layer 2 (64 filters, 3x3, padding=1) --> detects: corridors, blocked paths, pawn proximity to goal
       |
-Conv Layer 3 --> detects: strategic formations, trap setups, race conditions
+Flatten (64 × 9 × 9 = 5184)
       |
-Flatten --> Late fusion with scalars --> Dense layers --> output
+Concat with scalars (2,) --> (5186,)
+      |
+Dense(5186 → 256) → ReLU --> Dense(256 → 137) --> Q-values
 ```
+
+Two conv layers are used (not three) to keep the forward/backward pass fast on CPU.
+If the agent shows no learning signal after ~500k steps, adding a third layer is the
+first thing to try before concluding the algorithm is at fault.
 
 **Why not a Transformer?**
 
