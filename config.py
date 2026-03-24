@@ -56,10 +56,19 @@ REPLAY_BUFFER_SIZE = 50_000
 # Exploration (epsilon-greedy)
 # ---------------------------------------------------------------------------
 
-EPSILON_START = 1.0     # start fully random to collect diverse early experiences
-EPSILON_END = 0.05      # always keep 5% exploration so the agent doesn't over-exploit
-EPSILON_DECAY = 0.999   # multiplicative decay applied once per episode
-                        # reaches EPSILON_END after ~2,900 episodes
+# Shared floor — always keep 5% exploration so the agent doesn't over-exploit
+EPSILON_END = 0.05
+
+# RandomBot phase (curriculum phase 1) — weak opponent, less exploration needed.
+# Start half-exploiting; reaches EPSILON_END at ~130k steps.
+EPSILON_START_RANDOM = 0.5
+EPSILON_DECAY_RANDOM = 0.999985
+
+# HeuristicBot phase (curriculum phase 2) — stronger opponent, warm-started weights.
+# Moderate start with slower decay gives more time to explore harder strategies.
+# Reaches EPSILON_END at ~300k steps.
+EPSILON_START_HEURISTIC = 0.99
+EPSILON_DECAY_HEURISTIC = 0.99999
 
 # ---------------------------------------------------------------------------
 # Training budget

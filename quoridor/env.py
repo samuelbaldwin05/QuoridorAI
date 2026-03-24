@@ -3,8 +3,8 @@ Gym-style single-agent wrapper around QuoridorState.
 
 This module bridges the two-player Quoridor game and the single-agent RL
 training loop. From the training loop's perspective, there is only one agent
-(P0). The env handles P1's turns internally using HeuristicBot, making the
-full game transparent — each reset/step cycle looks like a standard MDP.
+(P0). The env handles P1's turns internally using a bot, making the full game
+transparent — each reset/step cycle looks like a standard MDP.
 
 Invariant: the agent is always P0. P0 moves first after every reset().
 
@@ -17,6 +17,11 @@ Reward structure (sparse, per CLAUDE.md):
     +1.0  agent (P0) reaches row 0
     -1.0  bot   (P1) reaches row 8
      0.0  all other transitions
+
+Opponent:
+    Pass any bot instance to __init__(bot=...) to swap opponents.
+    Defaults to HeuristicBot for backward compatibility. Use RandomBot
+    for curriculum training (easier first opponent before HeuristicBot).
 """
 
 import numpy as np
@@ -36,13 +41,19 @@ class QuoridorEnv:
     Single-agent Quoridor environment.
 
     The agent always plays as P0 (bottom, goal = row 0). After each agent
-    action, the env runs one HeuristicBot turn as P1, then returns control.
+    action, the env runs one bot turn as P1, then returns control.
     The training loop never observes P1's turn directly.
+
+    Parameters
+    ----------
+    bot : optional
+        Any bot instance with reset() and choose_action(game) methods.
+        Defaults to HeuristicBot(). Pass RandomBot() for curriculum training.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bot=None) -> None:
         self.state = QuoridorState()
-        self.bot = HeuristicBot()
+        self.bot = bot if bot is not None else HeuristicBot()
 
     # ------------------------------------------------------------------
     # Public API
