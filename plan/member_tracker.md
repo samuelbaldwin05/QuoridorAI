@@ -1,22 +1,37 @@
-Dreshta - Catching up on Machine learning
-Michael - Research.md on Reinforcement learning
-Jeff - Research.md on Reinforcement learning
+# Member Tracker
 
-Jeff — Stages 2 & 3 (DQN Core + Training Loop) — completed 2026-03-23
+## Sam Baldwin
+- Built core game engine (`quoridor/game.py`) — movement, fencing, pathfinding, win detection
+- Built heuristic bot (`agents/bot.py`) — priority chain: opening book, win-in-one, fence heuristics, UCS movement
+- Built display module (`quoridor/display.py`) and play scripts (`scripts/play.py`, `scripts/play_bot.py`)
 
-Built:
-- config.py (project root) — all hyperparameters as named constants
-- agents/dqn_model.py — CNN Q-network with late fusion, masked Q-values
-- agents/replay_buffer.py — preallocated circular buffer, 50k capacity
-- scripts/train_dqn.py — full training loop with epsilon-greedy, TD loss,
-  target network hard updates, W&B logging, checkpointing
-- tests/test_dqn_model.py — 11 tests (shapes, masking, gradients, BatchNorm modes)
-- tests/test_replay_buffer.py — 11 tests (push/sample correctness, circular overwrite)
+## Jeff Krapf — completed 2026-03-23
+- Built action encoding (`quoridor/action_encoding.py`) — 137-action bijection
+- Added `get_observation()` and `get_legal_mask()` to `quoridor/game.py`
+- Built env wrapper (`quoridor/env.py`) — Gym-style single-agent interface
+- Built DQN model (`agents/dqn_model.py`) — CNN with late fusion + action masking
+- Built replay buffer (`agents/replay_buffer.py`) — 50k circular buffer
+- Built random bot (`agents/random_bot.py`) — curriculum phase 1 opponent
+- Built training loop (`scripts/train_dqn.py`) — Double DQN, Huber loss, curriculum support
+- Built config (`config.py`) — all hyperparameters centralized
+- Tests: 61 total across 6 test files, all passing
 
-What's next (Stage 4):
-- Set up W&B (run: wandb login)
-- Run full training: python scripts/train_dqn.py
-- Run 200-episode evaluation once training completes
-- Save final checkpoint + config as W&B artifact
-- Update this file with final win rate and any remaining open questions
-Sam - Implementing heuristic agent in python
+## Michael Maaseide — completed 2026-03-26
+- Code cleanup across all source and test files
+- Rewrote planning docs (`plan/project_overview.md`, `plan/pytorch_notes.md`, `plan/design_notes.md`)
+- Ran initial training vs RandomBot — early results: ~60% win rate by step 4k, training ongoing
+
+## Dreshta Boghra
+- Catching up on machine learning fundamentals
+
+## Current status
+- DQN training vs RandomBot in progress (target: 80% win rate to graduate)
+- Next: warm-start trained weights and train vs HeuristicBot
+- After that: evaluate final model, consider PPO/self-play if time allows
+
+## What's left
+- Finish RandomBot training run, save best checkpoint
+- Train vs HeuristicBot: `python scripts/train_dqn.py --opponent heuristic --checkpoint checkpoints/best.pt`
+- Set up W&B logging for experiment tracking (`wandb login`, then run without `--no-wandb`)
+- Prepare slides for presentation (due Apr 8, presentations Apr 10/14/17)
+- Final deliverables due Apr 17
