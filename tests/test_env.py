@@ -44,25 +44,19 @@ def test_episode_terminates():
     _run_episode(env)  # should not raise
 
 
-def test_reward_sparse():
-    """All rewards except terminal should be 0."""
+def test_reward_step_penalty():
+    """Non-terminal rewards should be the step penalty."""
+    from config import STEP_PENALTY
     env = QuoridorEnv()
     rewards, _ = _run_episode(env)
     for r in rewards[:-1]:
-        assert r == 0.0
+        assert r == STEP_PENALTY
 
 
 def test_reward_terminal_is_nonzero():
     env = QuoridorEnv()
     rewards, _ = _run_episode(env)
     assert rewards[-1] in (1.0, -1.0)
-
-
-def test_reward_nonzero_exactly_once():
-    env = QuoridorEnv()
-    rewards, _ = _run_episode(env)
-    nonzero = [r for r in rewards if r != 0.0]
-    assert len(nonzero) == 1
 
 
 def test_legal_mask_in_info():

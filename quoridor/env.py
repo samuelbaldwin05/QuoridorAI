@@ -4,7 +4,7 @@ Gym-style wrapper around QuoridorState for single-agent RL training.
 The agent is always P0. Bot plays P1 internally after each agent action,
 so the training loop sees a standard reset/step MDP interface.
 
-Rewards: +1 agent wins, -1 bot wins, 0 otherwise.
+Rewards: +1 agent wins, -1 bot wins, STEP_PENALTY per non-terminal step.
 """
 
 import numpy as np
@@ -12,6 +12,7 @@ import numpy as np
 from quoridor.game import QuoridorState
 from quoridor.action_encoding import NUM_ACTIONS, index_to_action
 from agents.bot import HeuristicBot
+from config import STEP_PENALTY
 
 
 _TERMINAL_MASK = np.zeros(NUM_ACTIONS, dtype=bool)
@@ -55,9 +56,9 @@ class QuoridorEnv:
             spatial, scalars = self.state.get_observation()
             return spatial, scalars, -1.0, True, {"legal_mask": _TERMINAL_MASK.copy()}
 
-        # non-terminal
+        # non-terminal — small step penalty to discourage stalling
         spatial, scalars = self.state.get_observation()
-        return spatial, scalars, 0.0, False, {"legal_mask": self.state.get_legal_mask()}
+        return spatial, scalars, STEP_PENALTY, False, {"legal_mask": self.state.get_legal_mask()}
 
     def get_legal_mask(self):
         """Passthrough to state.get_legal_mask()."""
