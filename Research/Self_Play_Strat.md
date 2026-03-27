@@ -88,41 +88,82 @@ Frozen opponent sidesteps both issues by making the environment stationary for t
 
 ### What Opponent Epsilon Controls
 
-In the current training loop, epsilon controls the agent's exploration. In self-play, we also assign an epsilon to the frozen opponent. This controls how often the opponent ignores its Q-values and picks a random legal action. A high opponent epsilon produces a weaker, more unpredictable opponent. A low opponent epsilon produces a near-greedy, stronger opponent.
+In the current training loop, epsilon controls the **agent's** exploration. In
+self-play, we also assign an epsilon to the **frozen opponent**. This controls
+how often the opponent ignores its Q-values and picks a random legal action.
 
-This is distinct from simulated annealing in the classical optimization sense, but the analogy holds: high temperature (high epsilon) = more random exploration of the game tree and low temperature = more exploitation of learned strategy.
+A high opponent epsilon produces a weaker, more unpredictable opponent.
+A low opponent epsilon produces a near-greedy, stronger opponent.
+
+This is distinct from simulated annealing in the classical optimization sense,
+but the analogy holds: high temperature (high epsilon) = more random exploration
+of the game tree; low temperature = more exploitation of learned strategy.
 
 ### The Problem With a Fixed Opponent Epsilon
 
-Choosing a single fixed epsilon for the opponent is brittle. A value that is appropriate early in training (when the agent is weak and needs an easy opponent) may be too easy later, and vice versa.
+Choosing a single fixed epsilon for the opponent is brittle. A value that is
+appropriate early in training (when the agent is weak and needs an easy opponent)
+will be too easy later once the agent has improved, and vice versa. The right
+difficulty level is not a fixed number — it depends on how good the agent
+currently is.
 
-Research on adaptive exploration [Tokic 2010] confirms that fixed epsilon values require environment-specific tuning and that the optimal value varies significantly across training stages. No single value generalizes.
+Research on adaptive exploration [Tokic 2010] confirms this: fixed epsilon values
+require environment-specific tuning and the optimal value shifts significantly
+across training stages. No single value generalizes across the full training run.
 
-### Proposed Experiment: Epsilon Schedule Comparison
+### Proposed Approach: Win-Rate-Driven Opponent Annealing
 
-We propose running three training configurations and comparing their win rate curves against the HeuristicBot as the evaluation benchmark:
+Rather than committing to fixed epsilon values upfront, the opponent epsilon is
+treated as a second annealing schedule running in parallel with the agent's own
+epsilon — but instead of decaying on a fixed step schedule, it decays in response
+to the agent's measured win rate.
 
-| Run | Opponent Epsilon | Description |
-|-----|-----------------|-------------|
-| A   | Fixed 0.5       | High randomness throughout |
-| B   | Fixed 0.2       | Moderate, near-greedy throughout |
-| C   | Decaying 0.5→0.05 | Annealed on same schedule as agent |
+The intuition is direct: if the agent is winning easily, the opponent is too weak
+and its epsilon should drop (become harder). If the agent is struggling, the
+opponent epsilon should stay high (remain easier) until the agent catches up.
 
-**Hypothesis:** Run C will produce the highest final win rate against the HeuristicBot because the opponent difficulty scales naturally with the agent's improving policy. Early in training the agent faces an explorable opponent; late in training it faces a near-optimal one.
+```
+opponent_epsilon starts at: 0.5   (plays randomly half the time — approachable)
 
-**Secondary experiment:** If Run C confirms the hypothesis, a second round of runs tests the effect of the decay rate:
+Every EVAL_FREQ steps:
+    win_rate = evaluate(online_net, n=200, opponent=frozen_opponent)
 
-| Run | Decay Schedule | Notes |
-|-----|---------------|-------|
-| C1  | Fast decay (matches agent epsilon decay) | Opponent hardens quickly |
-| C2  | Slow decay (half the rate of agent) | Opponent stays easier longer |
-| C3  | Step decay (drops at promotion events) | Hardness tied to promotions |
+    if win_rate >= WIN_RATE_UPPER (e.g. 0.65):
+        opponent_epsilon *= ANNEAL_FACTOR   # lower it, opponent gets harder
+        opponent_epsilon  = max(opponent_epsilon, OPPONENT_EPSILON_MIN)
 
-The best-performing schedule from this round becomes the default for all subsequent self-play phases.
+    elif win_rate <= WIN_RATE_LOWER (e.g. 0.40):
+        opponent_epsilon *= (1 / ANNEAL_FACTOR)  # raise it, opponent gets easier
+        opponent_epsilon  = min(opponent_epsilon, 0.5)
+```
+
+This creates a feedback loop where the opponent difficulty tracks the agent's
+competence level throughout training, rather than being set-and-forgotten at the
+start. The agent is always playing against an opponent that is challenging but
+beatable — the same principle AlphaGo Zero used when requiring a 55% win rate
+threshold before promoting the opponent to the next checkpoint [Silver et al. 2017].
+
+### Suggested Starting Hyperparameters
+
+These are starting points to be tuned based on observed win rate curves in W&B:
+
+| Parameter | Suggested Value | Meaning |
+|-----------|----------------|---------|
+| `OPPONENT_EPSILON_START` | 0.5 | Opponent starts playing randomly half the time |
+| `OPPONENT_EPSILON_MIN` | 0.05 | Opponent never becomes fully greedy |
+| `WIN_RATE_UPPER` | 0.65 | Above this → lower opponent epsilon |
+| `WIN_RATE_LOWER` | 0.40 | Below this → raise opponent epsilon |
+| `ANNEAL_FACTOR` | 0.85 | How aggressively to adjust each eval |
+
+If win rate stays between 0.40 and 0.65 for many consecutive evals, opponent
+epsilon holds steady — the agent is in the right difficulty band and no
+adjustment is needed.
 
 ### Implementation
 
-The frozen opponent is loaded and called as follows. The epsilon value is passed in at evaluation time rather than baked into the checkpoint, so the same saved weights can be re-evaluated at any epsilon:
+The frozen opponent is loaded and called as follows. The epsilon value is passed
+in at evaluation time rather than baked into the checkpoint, so the same saved
+weights can be re-evaluated at any epsilon:
 
 ```python
 def frozen_opponent_action(model, state, epsilon, device):
@@ -143,7 +184,8 @@ def frozen_opponent_action(model, state, epsilon, device):
     return int(q.argmax(dim=1).item())
 ```
 
-The opponent epsilon is tracked separately from the agent epsilon and updated according to whichever schedule is under test.
+The opponent epsilon is tracked separately from the agent epsilon and updated
+according to whichever schedule is under test.
 
 ---
 
@@ -255,4 +297,3 @@ If win rate vs. HeuristicBot *drops* while win rate vs. frozen opponent *rises*,
 ---
 
 *Quoridor Deep RL Project — Self-Play Phase — March 2026*
-*Author: Dreshta Boghra*
