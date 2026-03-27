@@ -22,7 +22,9 @@
 - Ran initial training vs RandomBot — early results: ~60% win rate by step 4k, training ongoing
 
 ## Dreshta Boghra
-- Catching up on machine learning fundamentals
+- Caught up on ML and RL fundamentals (Q-values, Bellman equation, CNNs, state encoding, action space)
+- Researched self-play training strategies: frozen opponent methodology, win-rate-driven epsilon annealing, and league play
+- Wrote `Research/self_play_research.md` covering self-play training plan
 
 ## Current status
 - DQN training vs RandomBot in progress (target: 80% win rate to graduate)
