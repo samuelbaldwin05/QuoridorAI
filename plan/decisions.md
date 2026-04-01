@@ -344,6 +344,174 @@ with the state representation documented in CLAUDE.md and `get_observation()`.
 
 ---
 
+## 21. Frozen Self-Play as Curriculum Phase 2 (Replaces Heuristic Direct Training)
+
+**Decision:** Curriculum phase 2 is now `--opponent self-play` (frozen DQNBot) instead of
+direct training against HeuristicBot.
+
+**Why direct heuristic training failed:**
+The agent never won a single game against HeuristicBot in 131k steps. Q-values collapsed to
+~-1.17 (below the theoretical minimum of -1), loss dropped to near zero, and the network
+found a stable wrong fixed point: "everything loses." With no positive reward signal, there
+is no gradient to escape this collapse.
+
+**Why reward shaping also failed:**
+Potential-based path differential shaping (Decision 18) was applied to non-terminal steps.
+When the agent is losing every game, the path differential (D_opp - D_agent) is consistently
+negative, so shaped rewards were negative on every step. Combined with n-step returns (n=5),
+this amplified the all-negative signal and accelerated Q-value collapse.
+
+**Why frozen self-play works:**
+- The agent plays against a copy of itself → games are roughly balanced → ~50% win rate
+- Guaranteed positive (+1) signal from the start, preventing Q-value collapse
+- Teaches general Quoridor patterns (pawn racing, wall use, path optimization) rather than
+  random-exploiting habits or heuristic-specific counter-strategies
+- Better foundation for the PPO self-play phase
+
+**Non-stationarity management (key DQN concern):**
+True simultaneous self-play violates DQN's assumption of a stationary MDP. Instead, the
+opponent is a *frozen* copy of the online network (`DQNBot`), updated every
+`OPPONENT_UPDATE_FREQ = 10_000` steps. Between syncs the opponent is fixed — stable MDP.
+
+**Evaluation is always vs HeuristicBot:**
+Even during self-play training, win rate is measured against HeuristicBot every `EVAL_FREQ`
+steps. The graduation criterion (>80% vs heuristic) is unchanged.
+
+**Reward shaping removed:**
+Sparse rewards (+1/-1) are restored. Shaping requires occasional wins to anchor Q-values;
+without wins it only makes the all-negative collapse worse.
+
+**Usage:**
+```bash
+python -m scripts.train_dqn --opponent self-play --checkpoint checkpoints/best.pt
+```
+
+*Decision recorded: March 24, 2026*
+---
+
+## 16. Epsilon Start Reduced for Heuristic Warm-Start Phase
+
+**Decision:** `EPSILON_START_HEURISTIC` reduced from `0.99` to `0.5`.
+
+**Why:**
+The heuristic phase warm-starts from `checkpoints/best.pt` (the random-phase graduation checkpoint).
+Starting at epsilon=0.99 means the agent acts almost purely randomly for the first ~30k steps,
+ignoring the useful weights it just loaded. With epsilon=0.5, the learned policy is exploited
+from step 1 while still allowing substantial exploration to adapt to the harder opponent distribution.
+
+**Tradeoff considered:**
+If the random-trained value function transfers poorly to heuristic games (plausible — the game
+distributions are very different), higher epsilon early is less harmful. 0.5 is a middle ground:
+enough exploration to adapt, not so much that the warm-start is wasted.
+
+*Decision recorded: March 24, 2026*
+
+---
+
+## 17. Lower Learning Rate for Heuristic Phase
+
+**Decision:** Added `LEARNING_RATE_HEURISTIC = 5e-5` (half of the standard `1e-4`).
+
+**Why:**
+When warm-starting, the network already has a reasonable policy. Using the full learning rate
+means early noisy gradients from the new opponent distribution can overwrite learned features
+before the agent has seen enough heuristic-game experience to form useful replacements. A lower
+learning rate makes the update steps smaller and more conservative, preserving the warm-started
+weights while still allowing adaptation.
+
+**Implementation:** `train_dqn.py` selects the learning rate based on `--opponent`:
+`LEARNING_RATE_HEURISTIC` when `opponent == "heuristic"`, `LEARNING_RATE` otherwise.
+
+*Decision recorded: March 24, 2026*
+
+---
+
+## 18. Potential-Based Reward Shaping Added to env.py
+
+**Decision:** Non-terminal transitions now return a shaped reward instead of `0.0`.
+
+**Shaping function:**
+```
+F(s, s') = γ · Φ(s') - Φ(s)
+where Φ(s) = (D_opponent - D_agent) / 16
+```
+`D_agent` and `D_opponent` are BFS shortest-path distances to each player's goal row.
+Dividing by 16 normalizes the potential so per-step shaping is ~10× smaller than the ±1 terminal reward.
+
+**Why potential-based shaping:**
+Ng et al. (1999) proved that shaping of this form is policy-invariant — the optimal policy under
+the shaped reward is identical to the optimal policy under the sparse reward. Raw progress bonuses
+(e.g., +0.1 per row advanced) do not have this guarantee and can distort the learned policy.
+
+**Why path differential (not self-distance only):**
+`Φ(s) = -D_agent / 8` would only reward forward progress and give no signal for wall placements
+that block the opponent. The path differential rewards both advancing and placing blocking walls,
+which is essential against a heuristic bot that uses UCS pathfinding.
+
+**Why not shape terminal transitions:**
+Terminal rewards (+1.0 win, -1.0 loss) are kept clean so the win-rate graduation metric remains
+meaningful. Shaping terminal rewards would conflate game outcome with positional advantage.
+
+**When to remove:**
+Remove shaping before any self-play phase (PPO). The policy-invariance guarantee assumes a fixed
+opponent; with a non-stationary self-play opponent the guarantee no longer holds.
+
+*Decision recorded: March 24, 2026*
+
+---
+
+## 19. N-Step Returns (n=5) Added to Training Loop
+
+**Decision:** Replaced 1-step TD targets with 5-step discounted returns.
+
+**How it works:**
+Instead of storing `(s_t, a_t, r_t, s_{t+1})` in the replay buffer, a rolling deque accumulates
+5 transitions. Once full, the oldest transition is stored with:
+```
+reward = r_t + γ·r_{t+1} + γ²·r_{t+2} + γ³·r_{t+3} + γ⁴·r_{t+4}
+next_state = s_{t+5}
+```
+At episode boundaries, remaining transitions are flushed with truncated (< 5 step) returns.
+
+**Why n=5 for Quoridor vs heuristic:**
+Heuristic-phase games are ~12 steps. With 1-step TD, the terminal ±1 reward takes 12 gradient
+updates to propagate from the final step to the first. With n=5, it reaches the first step in
+just 3 update passes. This is critical when the agent never wins early and the only learning
+signal is the -1 loss at the end of each short episode.
+
+**Tradeoff:**
+N-step returns introduce off-policy bias when using experience replay (transitions were collected
+under an older policy). In practice this bias is well-tolerated for n ≤ 5 in DQN, and the
+variance reduction from faster signal propagation outweighs it for sparse-reward games.
+
+*Decision recorded: March 24, 2026*
+
+---
+
+## 20. HeuristicBot UCS Performance Optimization
+
+**Decision:** Pre-compute a 9×9 fence-distance grid once per `_ucs_path` call instead of
+calling `_min_fence_distance` per neighbor expansion.
+
+**What was slow:**
+`_min_fence_distance(game, row, col)` scans all 64 fence grid positions — O(64) per call.
+It was called inside `_ucs_path` for every neighbor of every expanded node: up to 81 nodes × 4
+neighbors = ~324 calls per UCS search. This produced ~20k Python operations per bot move.
+The bot was observed hanging during training evaluation (KeyboardInterrupt in `_min_fence_distance`)
+due to the accumulated cost over thousands of evaluation games.
+
+**Fix:**
+Added `_build_fence_distance_grid(game)` which collects all fence-affected squares once in
+O(FENCE_GRID² × 4) = O(256), then computes the 9×9 distance grid in O(81 × n_fence_squares).
+`_ucs_path` now calls this once before the search and does O(1) grid lookups per neighbor.
+Total reduction: ~O(83k) → ~O(7k) operations per UCS call (~12× improvement).
+
+**Behavior unchanged:** `_min_fence_distance` and `_fence_penalty` are retained for any
+external callers. `_ucs_path` output is identical — only the computation path differs.
+
+*Decision recorded: March 24, 2026*
+---
+
 ## 15. PyTorch Upgrade Required (2.1.2 → 2.11.0)
 
 **Decision:** Upgraded PyTorch from 2.1.2 to 2.11.0 to fix a NumPy compatibility issue.
@@ -368,3 +536,46 @@ If a future team member installs torchvision for any reason, they should upgrade
 compatible with torch 2.11.0 at the same time.
 
 *Decision recorded: March 23, 2026*
+
+---
+
+## 16. PPOBot Self-Play Flip Bug — Action Coordinates Not Unflipped
+
+**Status:** Known bug — NOT yet fixed. Must be fixed before starting PPO self-play.
+
+**Affects:** PPO self-play only. Does NOT affect PPO vs heuristic bot (PPOBot is not involved in that scenario).
+
+**Where:** `scripts/train_ppo.py`, `PPOBot.choose_action()`, lines ~104–132.
+
+**What the bug is:**
+
+`PPOBot.choose_action()` calls `game.get_observation(use_bfs=..., flip=(game.turn==1))` — correctly receiving a flipped (P1 perspective) observation when it is P1's turn. The PPO model selects an action index, which is decoded into a direction delta `(dr, dc)` for moves or a fence row `r` for wall placements.
+
+These decoded values are in the **flipped observation's coordinate space** — but are applied directly to the **actual (unflipped) board coordinates**. This means:
+
+- **Pawn moves:** Action 0 encodes `dr = -1` ("move up toward goal" in flipped space). In actual coordinates, P1's goal is row 8 (increasing row), so applying `dr = -1` moves P1 *away* from its goal.
+- **Fence placement:** Fence row `r` in flipped space corresponds to actual row `FENCE_GRID - 1 - r = 7 - r`. Placing the fence at actual row `r` instead of `7 - r` mirrors it to the wrong half of the board.
+
+**Why it doesn't affect PPO vs heuristic:**
+During PPO vs heuristic training, the PPO model plays as P0 (turn=0, flip=False). `PPOBot` (the frozen self-play surrogate) is never instantiated in that scenario. The heuristic bot uses raw `QuoridorState` coordinates directly.
+
+**The fix (apply before self-play phase):**
+
+After decoding the action index into `(dr, dc)` for moves or `(r, c, ori)` for fences, conditionally un-flip the coordinates:
+
+```python
+flip = (game.turn == 1)
+
+# For pawn moves:
+if flip:
+    dr = -dr  # columns are not flipped
+
+# For fence placements:
+if flip:
+    r = FENCE_GRID - 1 - r  # mirror back to actual row
+```
+
+**Why not fix it now:**
+The fix is straightforward but touches action resolution logic that is not exercised until self-play begins. Deferring avoids accidentally re-introducing the bug if the action encoding is modified during Stage 4. Fix this as the first task when self-play is introduced.
+
+*Decision recorded: March 31, 2026*

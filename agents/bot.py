@@ -142,27 +142,59 @@ class HeuristicBot:
         return game.shortest_path(opp) - game.shortest_path(me)
 
     def _find_high_impact_fence(self, game):
-        """Greedy one-ply lookahead over all legal fence placements.
-        Returns the fence that increases advantage by the most, if >= 3.
+        """Greedy one-ply lookahead over fences that cross the opponent's shortest path.
+
+        Why path-guided candidates instead of all valid fences:
+            _all_valid_fences() checks all 128 positions with _fence_ok() (2 BFS each),
+            then evaluates each valid fence with _advantage() (2 shortest_path each).
+            On a mid-game board with ~100 valid fences, that costs ~200+ shortest_path
+            calls per bot move.
+
+            A fence only increases the opponent's distance if it crosses an edge they
+            actually use. A path of ~10 edges yields ~18 raw candidates → ~10 valid
+            after _fence_ok() → ~10 shortest_path calls total (~20x fewer).
+
+        Why cache me_dist:
+            Blocking fences almost never lengthen our own path. Precomputing me_dist
+            once avoids one redundant shortest_path call per candidate.
         """
-        current_adv = self._advantage(game)
-        candidates = self._all_valid_fences(game)
-        random.shuffle(candidates)
+        me  = game.turn
+        opp = me ^ 1
+
+        opp_path = self._bfs_path(game, opp)
+        if len(opp_path) <= 1:
+            return None  # opponent already at goal or no path exists
+
+        candidates = self._fences_blocking_path(opp_path)
+        if not candidates:
+            return None
+
+        # Cache our distance — reused each iteration since blocking fences
+        # almost never lengthen our own shortest path.
+        me_dist     = game.shortest_path(me)
+        opp_dist    = game.shortest_path(opp)
+        current_adv = opp_dist - me_dist
 
         best_fence = None
-        best_gain = 0
+        best_gain  = 0
+
+        random.shuffle(candidates)
 
         for row, col, orientation in candidates:
+            if not game._fence_ok(row, col, orientation):
+                continue
+
             grid = game.h_walls if orientation == "h" else game.v_walls
             grid[row, col] = True
 
-            new_adv = self._advantage(game)
-            gain = new_adv - current_adv
+            # Only recompute opponent distance — our distance treated as stable.
+            new_opp_dist = game.shortest_path(opp)
+            gain = (new_opp_dist - me_dist) - current_adv
 
             grid[row, col] = False
 
             if gain >= 3 and gain > best_gain:
-                best_gain = gain
+                best_gain  = gain
                 best_fence = ("fence", row, col, orientation)
 
         return best_fence
@@ -286,6 +318,15 @@ class HeuristicBot:
         start = (int(game.pos[me, 0]), int(game.pos[me, 1]))
         goal = int(game.goals[me])
 
+        # Pre-compute a fence-distance grid once before the search.
+        # Without this, _fence_penalty (an O(FENCE_GRID²) scan) is called
+        # for every neighbor of every expanded node — up to ~324 times per
+        # UCS call. Building the grid once reduces that to a single O(256+81×n)
+        # pass, giving ~80x fewer operations when walls are on the board.
+        has_fences = game.fences_count() > 0
+        if has_fences:
+            fence_dist_grid = self._build_fence_distance_grid(game)
+
         # priority queue: (cost, row, col)
         pq = [(0.0, start[0], start[1])]
         costs = {start: 0.0}
@@ -314,7 +355,12 @@ class HeuristicBot:
                 if game._blocked(cr, cc, nr, nc):
                     continue
 
-                edge_cost = 1.0 + self._fence_penalty(game, nr, nc)
+                # O(1) grid lookup replaces the O(FENCE_GRID²) per-call scan
+                if has_fences:
+                    penalty = FENCE_PENALTIES.get(fence_dist_grid[nr][nc], 0.0)
+                else:
+                    penalty = 0.0
+                edge_cost = 1.0 + penalty
                 new_cost = cost + edge_cost
 
                 if new_cost < costs.get((nr, nc), float("inf")):
@@ -323,6 +369,115 @@ class HeuristicBot:
                     heappush(pq, (new_cost, nr, nc))
 
         return [start]  # no path found
+
+    def _bfs_path(self, game, player: int) -> list[tuple[int, int]]:
+        """BFS shortest path for player from their position to their goal row.
+
+        Returns a list of (row, col) cells from start to the first goal-row cell
+        reached (inclusive). Returns [start] if already at goal or no path exists.
+
+        Used by _find_high_impact_fence() to identify which fence positions could
+        actually block the opponent — fences not crossing this path cannot increase
+        their distance and are skipped.
+        """
+        start = (int(game.pos[player, 0]), int(game.pos[player, 1]))
+        goal  = int(game.goals[player])
+
+        if start[0] == goal:
+            return [start]
+
+        visited   = {start}
+        came_from = {start: None}
+        queue     = deque([start])
+
+        while queue:
+            cr, cc = queue.popleft()
+            for dr, dc in game.DIRECTIONS:
+                nr, nc = cr + dr, cc + dc
+                if (game._in_bounds(nr, nc)
+                        and (nr, nc) not in visited
+                        and not game._blocked(cr, cc, nr, nc)):
+                    visited.add((nr, nc))
+                    came_from[(nr, nc)] = (cr, cc)
+                    if nr == goal:
+                        path, node = [], (nr, nc)
+                        while node is not None:
+                            path.append(node)
+                            node = came_from[node]
+                        path.reverse()
+                        return path
+                    queue.append((nr, nc))
+
+        return [start]  # no path (should not occur in a valid game state)
+
+    def _fences_blocking_path(self, path: list[tuple[int, int]]) -> list[tuple[int, int, str]]:
+        """Return fence candidates that block at least one edge in path.
+
+        For each consecutive cell pair we identify which fence positions could
+        block that step. This follows the same logic as game._blocked():
+            vertical move   (same col) → blocked by h-walls at fence_row = min(r1,r2),
+                                         fence_cols c1-1 and c1
+            horizontal move (same row) → blocked by v-walls at fence_col = min(c1,c2),
+                                         fence_rows r1-1 and r1
+
+        Returns a deduplicated list of (row, col, orientation) within FENCE_GRID bounds.
+        Candidates may still fail _fence_ok() — filter before placing.
+        """
+        seen: set[tuple[int, int, str]] = set()
+        candidates: list[tuple[int, int, str]] = []
+
+        for i in range(len(path) - 1):
+            r1, c1 = path[i]
+            r2, c2 = path[i + 1]
+
+            if c1 == c2:  # vertical move (up or down) → h-wall blocks it
+                fence_row = min(r1, r2)
+                for fc in (c1 - 1, c1):
+                    if 0 <= fence_row < FENCE_GRID and 0 <= fc < FENCE_GRID:
+                        key = (fence_row, fc, "h")
+                        if key not in seen:
+                            seen.add(key)
+                            candidates.append(key)
+            else:          # horizontal move (left or right) → v-wall blocks it
+                fence_col = min(c1, c2)
+                for fr in (r1 - 1, r1):
+                    if 0 <= fr < FENCE_GRID and 0 <= fence_col < FENCE_GRID:
+                        key = (fr, fence_col, "v")
+                        if key not in seen:
+                            seen.add(key)
+                            candidates.append(key)
+
+        return candidates
+
+    def _build_fence_distance_grid(self, game) -> list[list[int]]:
+        """Pre-compute a BOARD_SIZE×BOARD_SIZE grid of Manhattan distances
+        from each square to the nearest fence-affected square.
+
+        A fence at grid position (fr, fc) touches the four board squares at
+        its corners. We collect all such squares from placed walls, then for
+        each of the 81 board cells compute the minimum Manhattan distance to
+        any of them. Called once per _ucs_path invocation.
+        """
+        # Collect unique board squares touched by any placed fence
+        fence_squares: set[tuple[int, int]] = set()
+        for fr in range(FENCE_GRID):
+            for fc in range(FENCE_GRID):
+                if game.h_walls[fr, fc] or game.v_walls[fr, fc]:
+                    for sq in self._fence_squares(fr, fc):
+                        fence_squares.add(sq)
+
+        # For each board cell, find min Manhattan distance to any fence square
+        grid: list[list[int]] = []
+        for r in range(BOARD_SIZE):
+            row: list[int] = []
+            for c in range(BOARD_SIZE):
+                min_dist = min(
+                    abs(r - ar) + abs(c - ac) for ar, ac in fence_squares
+                )
+                row.append(min_dist)
+            grid.append(row)
+
+        return grid
 
     def _fence_penalty(self, game, row, col):
         """Penalty for a square based on distance to nearest fence.

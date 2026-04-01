@@ -69,12 +69,16 @@ IMPORTANT: move actions use direction *deltas*, not absolute board positions.
 # Constants
 # ---------------------------------------------------------------------------
 
-NUM_ACTIONS: int = 137          # total size of the action space
+# Fundamental constants: import from config so this module stays in sync
+# if board dimensions or the action space ever change.
+from config import NUM_ACTIONS, FENCE_GRID
+
 MOVE_ACTION_COUNT: int = 8      # pawn move actions (cardinal + diagonal)
-H_WALL_OFFSET: int = 8          # index of the first horizontal wall action
-V_WALL_OFFSET: int = 72         # index of the first vertical wall action
-PASS_ACTION: int = 136          # reserved pass action; always masked illegal
-FENCE_GRID: int = 8             # fence placement grid is 8×8
+# Derived offsets — computed from the fundamental constants above so they
+# never drift out of sync with NUM_ACTIONS or FENCE_GRID.
+H_WALL_OFFSET: int = MOVE_ACTION_COUNT                          # first h-wall index = 8
+V_WALL_OFFSET: int = H_WALL_OFFSET + FENCE_GRID * FENCE_GRID   # first v-wall index = 72
+PASS_ACTION: int   = V_WALL_OFFSET + FENCE_GRID * FENCE_GRID   # pass index = 136
 
 # Maps pawn action index (0–7) to (row_delta, col_delta).
 # Cardinal entries (0–3) encode *direction*: the env wrapper matches any

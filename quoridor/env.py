@@ -29,6 +29,7 @@ import numpy as np
 from quoridor.game import QuoridorState
 from quoridor.action_encoding import NUM_ACTIONS, index_to_action
 from agents.bot import HeuristicBot
+from config import REWARD_SHAPING_OPP_COEF, REWARD_SHAPING_SELF_COEF
 
 
 # A mask of all False is returned on terminal steps — no moves are legal
@@ -51,9 +52,16 @@ class QuoridorEnv:
         Defaults to HeuristicBot(). Pass RandomBot() for curriculum training.
     """
 
-    def __init__(self, bot=None) -> None:
+    def __init__(self, bot=None, use_bfs: bool = False, use_reward_shaping: bool = False) -> None:
         self.state = QuoridorState()
         self.bot = bot if bot is not None else HeuristicBot()
+        # When True, get_observation() returns 6-channel spatial tensors (adds
+        # BFS distance maps as ch4 and ch5). Must match the model's NUM_CHANNELS.
+        self.use_bfs = use_bfs
+        # When True, step() adds a small dense shaped reward based on the change
+        # in each player's shortest path caused by the agent's action. Terminal
+        # rewards (+1/-1) remain pure — shaping only applies to non-terminal steps.
+        self.use_reward_shaping = use_reward_shaping
 
     # ------------------------------------------------------------------
     # Public API
@@ -72,7 +80,7 @@ class QuoridorEnv:
         """
         self.state.reset()
         self.bot.reset()
-        spatial, scalars = self.state.get_observation()  # turn == 0 (P0)
+        spatial, scalars = self.state.get_observation(use_bfs=self.use_bfs)  # turn == 0 (P0)
         return spatial, scalars
 
     def step(self, action: int) -> tuple[np.ndarray, np.ndarray, float, bool, dict]:
@@ -106,28 +114,54 @@ class QuoridorEnv:
                 "Only actions where get_legal_mask()[action] is True are allowed."
             )
 
-        # ── 2. Apply agent action ────────────────────────────────────────────
+        # ── 2. Measure paths BEFORE agent action (reward shaping only) ───────
+        # Captured here so we credit the agent's action alone, not the bot's
+        # subsequent response. The agent is always P0.
+        if self.use_reward_shaping:
+            my_path_before  = self.state.shortest_path(0)
+            opp_path_before = self.state.shortest_path(1)
+
+        # ── 3. Apply agent action ────────────────────────────────────────────
         agent_won = self._apply_index(action)
 
         if agent_won:
-            # Game over — bot does not get to respond.
-            spatial, scalars = self.state.get_observation()
+            # Game over — terminal reward stays pure, no shaping applied.
+            spatial, scalars = self.state.get_observation(use_bfs=self.use_bfs)
             return spatial, scalars, +1.0, True, {"legal_mask": _TERMINAL_MASK.copy()}
 
-        # ── 3. Bot responds as P1 ────────────────────────────────────────────
+        # ── 4. Compute shaped reward BEFORE bot responds ──────────────────────
+        # Measured after the agent's action but before the bot's response so the
+        # reward reflects only what the agent did.
+        #
+        # shaped_reward = OPP_COEF  * (opp_path_before - opp_path_after)  [good wall]
+        #               + SELF_COEF * (my_path_before  - my_path_after)   [good pawn]
+        #
+        # Both terms are positive when good things happen and negative otherwise.
+        if self.use_reward_shaping:
+            my_path_after  = self.state.shortest_path(0)
+            opp_path_after = self.state.shortest_path(1)
+            shaped_reward = (
+                REWARD_SHAPING_OPP_COEF  * (opp_path_before - opp_path_after) +
+                REWARD_SHAPING_SELF_COEF * (my_path_before  - my_path_after)
+            )
+        else:
+            shaped_reward = 0.0
+
+        # ── 5. Bot responds as P1 ────────────────────────────────────────────
         bot_action = self.bot.choose_action(self.state)
         self._dispatch_bot_action(bot_action)
 
         bot_won = self.state.done  # place_fence / move_to set state.done internally
 
         if bot_won:
-            spatial, scalars = self.state.get_observation()
+            # Terminal reward stays pure — bot's win is a clean -1.0 signal.
+            spatial, scalars = self.state.get_observation(use_bfs=self.use_bfs)
             return spatial, scalars, -1.0, True, {"legal_mask": _TERMINAL_MASK.copy()}
 
-        # ── 4. Non-terminal transition ───────────────────────────────────────
-        spatial, scalars = self.state.get_observation()  # turn is back to P0
+        # ── 6. Non-terminal transition ───────────────────────────────────────
+        spatial, scalars = self.state.get_observation(use_bfs=self.use_bfs)  # turn is back to P0
         next_mask = self.state.get_legal_mask()
-        return spatial, scalars, 0.0, False, {"legal_mask": next_mask}
+        return spatial, scalars, shaped_reward, False, {"legal_mask": next_mask}
 
     def get_legal_mask(self) -> np.ndarray:
         """
