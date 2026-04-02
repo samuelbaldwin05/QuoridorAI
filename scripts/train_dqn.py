@@ -1,25 +1,13 @@
 """
-train_dqn.py — DQN training loop for the Quoridor agent.
+DQN training loop for the Quoridor agent.
 
-This script ties together all Stage 2 components (DQNModel, ReplayBuffer,
-config) with the Stage 1 environment (QuoridorEnv) to train a vanilla DQN
-agent against the HeuristicBot.
-
-Algorithm summary:
-  1. Collect transitions via epsilon-greedy exploration
-  2. Store them in a replay buffer
-  3. Sample random mini-batches to compute TD loss
-  4. Periodically hard-copy the online network to a frozen target network
-  5. Evaluate win rate vs HeuristicBot every EVAL_FREQ steps
-  6. Save the best checkpoint; stop when win rate >= WIN_RATE_TARGET
+Collects transitions via epsilon-greedy, trains with Double DQN + Huber loss,
+evaluates win rate periodically. Supports curriculum training (RandomBot first,
+then HeuristicBot with warm-started weights).
 
 Usage:
-    python scripts/train_dqn.py              # requires wandb login
-    python scripts/train_dqn.py --no-wandb   # dry run, no W&B logging
-
-Device selection (automatic):
-    MPS  — Apple Silicon GPU (fastest on Mac, used if available)
-    CPU  — fallback if MPS is not available
+    python scripts/train_dqn.py --opponent random --no-wandb
+    python scripts/train_dqn.py --opponent heuristic --checkpoint checkpoints/best.pt
 """
 
 import argparse
@@ -64,49 +52,18 @@ from quoridor.action_encoding import H_WALL_OFFSET, PASS_ACTION
 from quoridor.env import QuoridorEnv
 
 
-# ---------------------------------------------------------------------------
-# Action selection
-# ---------------------------------------------------------------------------
-
-def epsilon_greedy(
-    model: DQNModel,
-    spatial: np.ndarray,
-    scalars: np.ndarray,
-    legal_mask: np.ndarray,
-    epsilon: float,
-    device: torch.device,
-) -> int:
-    """
-    Select an action using an epsilon-greedy policy.
-
-    With probability epsilon, choose uniformly at random from legal actions
-    (exploration). Otherwise, choose the action with the highest Q-value
-    (exploitation).
-
-    Args:
-        model:      Online DQN network.
-        spatial:    Board observation, shape (4, 9, 9).
-        scalars:    Wall-count features, shape (2,).
-        legal_mask: Boolean array of legal actions, shape (137,).
-        epsilon:    Current exploration probability.
-        device:     Torch device (mps or cpu) to run inference on.
-
-    Returns:
-        Chosen action index in [0, NUM_ACTIONS).
-    """
+def epsilon_greedy(model, spatial, scalars, legal_mask, epsilon, device):
+    """Pick action: random with prob epsilon, greedy otherwise."""
     if random.random() < epsilon:
-        # Explore: sample uniformly from all legal actions
         legal_indices = np.where(legal_mask)[0]
         return int(np.random.choice(legal_indices))
 
-    # Exploit: greedy argmax over Q-values
     model.eval()
     with torch.no_grad():
-        # Add batch dimension and move to device: (4,9,9) → (1,4,9,9)
-        spatial_t    = torch.tensor(spatial).unsqueeze(0).to(device)     # (1, 4, 9, 9)
-        scalars_t    = torch.tensor(scalars).unsqueeze(0).to(device)     # (1, 2)
-        legal_mask_t = torch.tensor(legal_mask).unsqueeze(0).to(device)  # (1, 137)
-        q = model(spatial_t, scalars_t, legal_mask_t)                    # (1, 137)
+        spatial_t    = torch.tensor(spatial).unsqueeze(0).to(device)
+        scalars_t    = torch.tensor(scalars).unsqueeze(0).to(device)
+        legal_mask_t = torch.tensor(legal_mask).unsqueeze(0).to(device)
+        q = model(spatial_t, scalars_t, legal_mask_t)
     return int(q.argmax(dim=1).item())
 
 
@@ -168,8 +125,10 @@ def compute_td_loss(
 
     B = spatial.shape[0]
 
-    # All-True mask for current state — masking doesn't affect gather() on taken action
+    # Q(s, a) for the action we actually took
     all_true_mask = torch.ones(B, NUM_ACTIONS, dtype=torch.bool, device=device)
+    q_all     = online_net(spatial, scalars, all_true_mask)
+    q_current = q_all.gather(1, actions.unsqueeze(1)).squeeze(1)
 
     # Q(s, a) — online network, select Q-value for the action that was actually taken
     q_all     = online_net(spatial, scalars, all_true_mask)         # (B, 137)
@@ -225,25 +184,8 @@ def compute_td_loss(
     return loss, mean_q, td_errors, batch["indices"], move_entropy, wall_entropy
 
 
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-
-def evaluate(model: DQNModel, n_episodes: int, device: torch.device, bot) -> tuple[float, float]:
-    """
-    Evaluate the agent's win rate against the given bot.
-
-    Runs n_episodes full games with a greedy (epsilon=0) policy.
-
-    Args:
-        model:      DQN network to evaluate.
-        n_episodes: Number of evaluation games to run.
-        device:     Torch device (mps or cpu) to run inference on.
-        bot:        Opponent bot instance (must match the training opponent).
-
-    Returns:
-        (win_rate, mean_episode_length)
-    """
+def evaluate(model, n_episodes, device, bot):
+    """Run n_episodes with greedy policy. Returns (win_rate, mean_ep_length)."""
     eval_env = QuoridorEnv(bot=bot)
     model.eval()
     wins = 0
@@ -267,44 +209,28 @@ def evaluate(model: DQNModel, n_episodes: int, device: torch.device, bot) -> tup
                 legal_mask = info["legal_mask"]
                 ep_length += 1
 
-            if reward > 0:  # +1.0 means agent (P0) won
+            if reward > 0:
                 wins += 1
             total_length += ep_length
 
     model.train()
-    win_rate = wins / n_episodes
-    mean_length = total_length / n_episodes
-    return win_rate, mean_length
+    return wins / n_episodes, total_length / n_episodes
 
 
-# ---------------------------------------------------------------------------
-# Training loop
-# ---------------------------------------------------------------------------
-
-def main(use_wandb: bool, args) -> None:
-    """
-    Run the full DQN training loop.
-
-    Args:
-        use_wandb: If True, log metrics to Weights & Biases.
-                   Set to False for dry runs before W&B is configured.
-    """
-    # --- Device selection ---
-    # Use Apple Silicon GPU (MPS) if available; fall back to CPU.
-    # MPS is significantly faster than CPU for conv/linear layers on Apple Silicon.
+def main(use_wandb, args):
+    # device
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
     print(f"Device: {device}")
 
-    # --- Reproducibility ---
+    # reproducibility
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     random.seed(SEED)
-    print(f"Seed: {SEED}")
 
-    # --- Initialise components ---
+    # opponent setup
     if args.opponent == "random":
         from agents.random_bot import RandomBot
         bot = RandomBot()
@@ -326,8 +252,8 @@ def main(use_wandb: bool, args) -> None:
     print(f"Opponent: {args.opponent}")
 
     online_net = DQNModel().to(device)
-    target_net = copy.deepcopy(online_net)   # already on device via deepcopy
-    target_net.eval()  # target net is never trained directly; always frozen
+    target_net = copy.deepcopy(online_net)
+    target_net.eval()
 
     # --- Optional checkpoint warm-start ---
     # Use this when transitioning between curriculum phases (e.g. RandomBot → self-play).
@@ -366,7 +292,7 @@ def main(use_wandb: bool, args) -> None:
 
     os.makedirs("checkpoints", exist_ok=True)
 
-    # --- W&B setup ---
+    # wandb
     if use_wandb:
         import wandb
         wandb.init(
@@ -380,18 +306,14 @@ def main(use_wandb: bool, args) -> None:
                 "batch_size":         BATCH_SIZE,
                 "replay_buffer_size": buffer._tree.capacity,
                 "target_update_freq": TARGET_UPDATE_FREQ,
-                "gradient_clip_norm": GRADIENT_CLIP_NORM,
-                "epsilon_start":      epsilon_start,
-                "epsilon_end":        EPSILON_END,
-                "epsilon_decay":      epsilon_decay,
-                "max_steps":          MAX_STEPS,
-                "eval_freq":          EVAL_FREQ,
-                "eval_episodes":      EVAL_EPISODES,
-                "seed":               SEED,
+                "grad_clip": GRADIENT_CLIP_NORM,
+                "epsilon_start": epsilon_start, "epsilon_end": EPSILON_END,
+                "epsilon_decay": epsilon_decay, "max_steps": MAX_STEPS,
+                "eval_freq": EVAL_FREQ, "eval_episodes": EVAL_EPISODES,
+                "seed": SEED,
             },
         )
 
-    # --- Training state ---
     epsilon       = epsilon_start
     total_steps   = 0
     best_win_rate = 0.0
@@ -404,8 +326,7 @@ def main(use_wandb: bool, args) -> None:
     # gradient passes — critical for short sparse-reward episodes.
     n_step_buffer: deque = deque()
 
-    print("Starting training...")
-    print(f"Buffer fills after {BATCH_SIZE} steps; first update then.")
+    print(f"Starting training... buffer fills after {BATCH_SIZE} steps")
 
     # --- Main loop ---
     # Wrapped in try/finally so a Ctrl+C or crash always writes a checkpoint.
@@ -580,10 +501,6 @@ def main(use_wandb: bool, args) -> None:
             import wandb
             wandb.finish()
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train DQN agent for Quoridor.")

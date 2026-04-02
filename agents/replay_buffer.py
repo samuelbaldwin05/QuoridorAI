@@ -126,16 +126,16 @@ class ReplayBuffer:
     Fixed-capacity circular buffer storing DQN transitions.
     Samples uniformly at random — no prioritization.
 
-    Each transition contains:
-        state_spatial   : (4, 9, 9)  float32  — board channels for current state
-        state_scalars   : (2,)       float32  — wall counts for current state
-        action          : int                 — action index taken (0–136)
-        reward          : float               — reward received (+1, -1, or 0)
-        next_spatial    : (4, 9, 9)  float32  — board channels for next state
-        next_scalars    : (2,)       float32  — wall counts for next state
-        done            : bool                — True if episode ended
-        next_legal_mask : (137,)     bool     — legal actions in next state
-    """
+    def __init__(self):
+        cap = REPLAY_BUFFER_SIZE
+        self._spatial      = np.zeros((cap, NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
+        self._scalars      = np.zeros((cap, NUM_SCALARS), dtype=np.float32)
+        self._actions      = np.zeros((cap,), dtype=np.int64)
+        self._rewards      = np.zeros((cap,), dtype=np.float32)
+        self._next_spatial = np.zeros((cap, NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
+        self._next_scalars = np.zeros((cap, NUM_SCALARS), dtype=np.float32)
+        self._dones        = np.zeros((cap,), dtype=bool)
+        self._next_legal_mask = np.zeros((cap, NUM_ACTIONS), dtype=bool)
 
     def __init__(self) -> None:
         self._spatial         = np.zeros((REPLAY_BUFFER_SIZE, NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)

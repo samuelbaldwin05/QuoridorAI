@@ -1,12 +1,6 @@
 """
-config.py — Centralized hyperparameters for the DQN training pipeline.
-
-All constants are defined here so that the model, replay buffer, and training
-loop stay in sync without hunting through multiple files. Change a value once
-here and it propagates everywhere.
-
-Import pattern:
-    from config import BATCH_SIZE, GAMMA, ...
+Hyperparameters for DQN training. Change values here and they
+propagate to the model, buffer, and training loop.
 """
 
 # ---------------------------------------------------------------------------
@@ -49,10 +43,11 @@ REWARD_SHAPING_SELF_COEF = 0.01  # reward per step saved on agent's own shortest
 # Neural network architecture
 # ---------------------------------------------------------------------------
 
+# network architecture
 CONV1_FILTERS = 32
 CONV2_FILTERS = 64
-CONV_KERNEL_SIZE = 3    # 3x3 kernels; padding=1 preserves spatial dims
-FC_HIDDEN_SIZE = 256    # size of the fully-connected layer after late fusion
+CONV_KERNEL_SIZE = 3
+FC_HIDDEN_SIZE = 256
 
 # ---------------------------------------------------------------------------
 # Training
@@ -73,24 +68,15 @@ TARGET_UPDATE_FREQ = 500
 # Gradient clipping prevents exploding gradients, which are common early in
 # training when Q-value estimates are wildly inaccurate.
 GRADIENT_CLIP_NORM = 10.0
+STEP_PENALTY = -0.01   # small penalty per step to discourage stalling
 
-# ---------------------------------------------------------------------------
-# Replay buffer
-# ---------------------------------------------------------------------------
-
-# CPU constraint: 50k transitions × (4,9,9) float32 spatial ≈ ~650 MB.
-# Increase to 100k+ if RAM allows; more diversity helps training stability.
+# replay buffer
 REPLAY_BUFFER_SIZE = 50_000
 
-# ---------------------------------------------------------------------------
-# Exploration (epsilon-greedy)
-# ---------------------------------------------------------------------------
-
-# Shared floor — always keep 5% exploration so the agent doesn't over-exploit
+# epsilon-greedy exploration
 EPSILON_END = 0.05
 
-# RandomBot phase (curriculum phase 1) — weak opponent, less exploration needed.
-# Start half-exploiting; reaches EPSILON_END at ~130k steps.
+# curriculum phase 1: vs RandomBot (weak, less exploration needed)
 EPSILON_START_RANDOM = 0.5
 EPSILON_DECAY_RANDOM = 0.999985
 
@@ -108,17 +94,13 @@ EPSILON_START_SELF_PLAY = 0.3
 EPSILON_DECAY_SELF_PLAY = 0.99997
 EPSILON_DECAY_HEURISTIC = 0.99999
 
-# ---------------------------------------------------------------------------
-# Training budget
-# ---------------------------------------------------------------------------
-
-# Total env steps before training stops. At ~30 steps/episode this is ~17k
-# episodes. Tune up to 1_000_000 if the agent hasn't converged by then.
+# training budget
 MAX_STEPS = 500_000
 
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
+# evaluation
+EVAL_FREQ = 5_000
+EVAL_EPISODES = 20
+WIN_RATE_TARGET = 0.80
 
 # Evaluate win rate every N *env steps* (not gradient steps) so the frequency
 # is consistent regardless of when the replay buffer starts filling.
