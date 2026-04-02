@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git checkout:*)",
       "Bash(git ls-tree:*)",
-      "Bash(git show-ref:*)"
+      "Bash(git show-ref:*)",
+      "WebSearch"
     ]
   }
 }

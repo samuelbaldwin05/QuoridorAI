@@ -5,14 +5,19 @@ The agent is always P0. Bot plays P1 internally after each agent action,
 so the training loop sees a standard reset/step MDP interface.
 
 Rewards: +1 agent wins, -1 bot wins, STEP_PENALTY per non-terminal step.
+Optional PBRS (potential-based reward shaping) adds a small bonus based
+on tempo advantage and path width without changing the optimal policy.
 """
 
 import numpy as np
 
-from quoridor.game import QuoridorState
+from quoridor.game import QuoridorState, BOARD_SIZE
 from quoridor.action_encoding import NUM_ACTIONS, index_to_action
 from agents.bot import HeuristicBot
-from config import STEP_PENALTY
+from config import (
+    STEP_PENALTY, GAMMA,
+    REWARD_SHAPING_ENABLED, TEMPO_WEIGHT, PATH_WIDTH_WEIGHT,
+)
 
 
 _TERMINAL_MASK = np.zeros(NUM_ACTIONS, dtype=bool)
@@ -21,9 +26,12 @@ _TERMINAL_MASK = np.zeros(NUM_ACTIONS, dtype=bool)
 class QuoridorEnv:
     """Single-agent Quoridor environment. Agent=P0, bot=P1."""
 
-    def __init__(self, bot=None):
+    def __init__(self, bot=None, reward_shaping=None):
         self.state = QuoridorState()
         self.bot = bot if bot is not None else HeuristicBot()
+        self.use_shaping = (
+            REWARD_SHAPING_ENABLED if reward_shaping is None else reward_shaping
+        )
 
     def reset(self):
         """Start a new episode. Returns (spatial, scalars)."""
@@ -42,6 +50,10 @@ class QuoridorEnv:
         if not legal[action]:
             raise ValueError(f"Action {action} is illegal in current state")
 
+        # capture potential BEFORE agent moves (for PBRS)
+        if self.use_shaping:
+            phi_s = self._compute_potential()
+
         # agent moves
         agent_won = self._apply_index(action)
         if agent_won:
@@ -56,9 +68,30 @@ class QuoridorEnv:
             spatial, scalars = self.state.get_observation()
             return spatial, scalars, -1.0, True, {"legal_mask": _TERMINAL_MASK.copy()}
 
-        # non-terminal — small step penalty to discourage stalling
+        # non-terminal — step penalty + optional PBRS shaping
+        reward = STEP_PENALTY
+        if self.use_shaping:
+            phi_s_prime = self._compute_potential()
+            reward += GAMMA * phi_s_prime - phi_s
+
         spatial, scalars = self.state.get_observation()
-        return spatial, scalars, STEP_PENALTY, False, {"legal_mask": self.state.get_legal_mask()}
+        return spatial, scalars, reward, False, {"legal_mask": self.state.get_legal_mask()}
+
+    def _compute_potential(self):
+        """Compute Phi(s) for PBRS. Agent is always P0."""
+        my_dist, my_reach = self.state.shortest_path_and_reach(0)
+        opp_dist, _ = self.state.shortest_path_and_reach(1)
+
+        # clamp infinite distances to a bounded value
+        if my_dist == float("inf"):
+            tempo = -20.0
+        elif opp_dist == float("inf"):
+            tempo = 20.0
+        else:
+            tempo = float(opp_dist - my_dist)
+
+        return (TEMPO_WEIGHT * tempo
+                + PATH_WIDTH_WEIGHT * (my_reach / BOARD_SIZE))
 
     def get_legal_mask(self):
         """Passthrough to state.get_legal_mask()."""

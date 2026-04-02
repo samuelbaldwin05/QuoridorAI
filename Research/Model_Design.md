@@ -369,3 +369,11 @@ make AlphaZero's design make sense when we get there.
 ---
 
 *Quoridor Deep RL Project -- Design Phase -- February 2026*
+
+
+
+
+
+# Notes from the meeting
+
+We need to work on the reward design. He encourages playing around with what types of layers that we our using for our neural network. He encourages the use of something like relus, making the layers deeper, making different networks for different things. He does think that our agent has to be able to finish the game. His main thing is that our agent is able to finish the game in some capacity. They are just really interested in what the agents are learning with each of our configuration. They alsao want to know what the failures were at each stage and what we learned from each of those instances. He wants us to hash our states for more info in less time. He really wants us to be able to explain all of our code. 

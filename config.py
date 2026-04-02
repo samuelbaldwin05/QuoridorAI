@@ -23,6 +23,11 @@ TARGET_UPDATE_FREQ = 200
 GRADIENT_CLIP_NORM = 10.0
 STEP_PENALTY = -0.01   # small penalty per step to discourage stalling
 
+# reward shaping (PBRS)
+REWARD_SHAPING_ENABLED = True   # set False for self-play or ablation
+TEMPO_WEIGHT = 0.05             # weight for (opp_dist - my_dist) potential
+PATH_WIDTH_WEIGHT = 0.02        # weight for reachable-goal-cells potential
+
 # replay buffer
 REPLAY_BUFFER_SIZE = 50_000
 

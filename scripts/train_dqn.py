@@ -27,6 +27,7 @@ from config import (
     EPSILON_END, EPSILON_START_HEURISTIC, EPSILON_START_RANDOM,
     EVAL_EPISODES, EVAL_FREQ, GAMMA, GRADIENT_CLIP_NORM,
     LEARNING_RATE, MAX_STEPS, NUM_ACTIONS, REPLAY_BUFFER_SIZE,
+    REWARD_SHAPING_ENABLED, TEMPO_WEIGHT, PATH_WIDTH_WEIGHT,
     SEED, TARGET_UPDATE_FREQ, WIN_RATE_TARGET,
 )
 from quoridor.env import QuoridorEnv
@@ -137,7 +138,8 @@ def main(use_wandb, args):
         epsilon_decay = EPSILON_DECAY_HEURISTIC
     print(f"Opponent: {args.opponent}")
 
-    env        = QuoridorEnv(bot=bot)
+    shaping = not args.no_shaping if args.no_shaping else None
+    env        = QuoridorEnv(bot=bot, reward_shaping=shaping)
     online_net = DQNModel().to(device)
     target_net = copy.deepcopy(online_net)
     target_net.eval()
@@ -170,6 +172,10 @@ def main(use_wandb, args):
                 "epsilon_decay": epsilon_decay, "max_steps": MAX_STEPS,
                 "eval_freq": EVAL_FREQ, "eval_episodes": EVAL_EPISODES,
                 "seed": SEED,
+                "reward_shaping": REWARD_SHAPING_ENABLED
+                    if not args.no_shaping else False,
+                "tempo_weight": TEMPO_WEIGHT,
+                "path_width_weight": PATH_WIDTH_WEIGHT,
             },
         )
 
@@ -270,5 +276,7 @@ if __name__ == "__main__":
                         help="Training opponent: random (phase 1) or heuristic (phase 2)")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Path to .pt checkpoint for warm-start")
+    parser.add_argument("--no-shaping", action="store_true",
+                        help="Disable reward shaping (for ablation or self-play)")
     args = parser.parse_args()
     main(use_wandb=not args.no_wandb, args=args)

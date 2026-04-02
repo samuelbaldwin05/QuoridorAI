@@ -216,6 +216,58 @@ class QuoridorState:
 
         return float("inf")
 
+    def shortest_path_and_reach(self, player):
+        """BFS returning (shortest_distance, reachable_goal_cells).
+
+        Unlike shortest_path(), this does NOT early-exit at the first
+        goal cell — it continues the BFS to count all reachable cells
+        on the goal row.  Still O(81) on a 9x9 board.
+        """
+        start = (int(self.pos[player, 0]), int(self.pos[player, 1]))
+        goal = int(self.goals[player])
+
+        if start[0] == goal:
+            # already on goal row — count reachable goal cells via BFS
+            reachable = 1
+            visited = set()
+            visited.add(start)
+            queue = deque([(start[0], start[1])])
+            while queue:
+                cr, cc = queue.popleft()
+                for dr, dc in self.DIRECTIONS:
+                    nr, nc = cr + dr, cc + dc
+                    if (self._in_bounds(nr, nc)
+                            and (nr, nc) not in visited
+                            and not self._blocked(cr, cc, nr, nc)):
+                        visited.add((nr, nc))
+                        queue.append((nr, nc))
+                        if nr == goal:
+                            reachable += 1
+            return 0, reachable
+
+        min_dist = float("inf")
+        reachable = 0
+        visited = set()
+        visited.add(start)
+        queue = deque([(start[0], start[1], 0)])
+
+        while queue:
+            cr, cc, dist = queue.popleft()
+            for dr, dc in self.DIRECTIONS:
+                nr, nc = cr + dr, cc + dc
+                if (self._in_bounds(nr, nc)
+                        and (nr, nc) not in visited
+                        and not self._blocked(cr, cc, nr, nc)):
+                    visited.add((nr, nc))
+                    if nr == goal:
+                        reachable += 1
+                        if dist + 1 < min_dist:
+                            min_dist = dist + 1
+                    else:
+                        queue.append((nr, nc, dist + 1))
+
+        return min_dist, reachable
+
     def _has_path(self, player):
         """Whether a player can reach their goal row."""
         return self.shortest_path(player) < float("inf")

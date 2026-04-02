@@ -45,9 +45,9 @@ def test_episode_terminates():
 
 
 def test_reward_step_penalty():
-    """Non-terminal rewards should be the step penalty."""
+    """Non-terminal rewards should be the step penalty when shaping is off."""
     from config import STEP_PENALTY
-    env = QuoridorEnv()
+    env = QuoridorEnv(reward_shaping=False)
     rewards, _ = _run_episode(env)
     for r in rewards[:-1]:
         assert r == STEP_PENALTY
@@ -57,6 +57,39 @@ def test_reward_terminal_is_nonzero():
     env = QuoridorEnv()
     rewards, _ = _run_episode(env)
     assert rewards[-1] in (1.0, -1.0)
+
+
+def test_reward_shaping_changes_reward():
+    """With shaping on, at least one non-terminal reward differs from STEP_PENALTY."""
+    from config import STEP_PENALTY
+    env = QuoridorEnv(reward_shaping=True)
+    rewards, _ = _run_episode(env)
+    shaped = rewards[:-1]
+    assert any(r != STEP_PENALTY for r in shaped), "Shaping produced no change"
+
+
+def test_reward_shaping_terminal_unchanged():
+    """Terminal reward should be exactly +1 or -1 regardless of shaping."""
+    env = QuoridorEnv(reward_shaping=True)
+    rewards, _ = _run_episode(env)
+    assert rewards[-1] in (1.0, -1.0)
+
+
+def test_reward_shaping_magnitudes():
+    """Shaped non-terminal rewards should be small relative to win/loss."""
+    env = QuoridorEnv(reward_shaping=True)
+    rewards, _ = _run_episode(env)
+    for r in rewards[:-1]:
+        assert abs(r) < 0.5, f"Shaped reward {r} is too large"
+
+
+def test_reward_shaping_disabled_override():
+    """Constructor override should disable shaping regardless of config."""
+    from config import STEP_PENALTY
+    env = QuoridorEnv(reward_shaping=False)
+    rewards, _ = _run_episode(env)
+    for r in rewards[:-1]:
+        assert r == STEP_PENALTY
 
 
 def test_legal_mask_in_info():
