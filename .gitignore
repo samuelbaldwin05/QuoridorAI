@@ -9,4 +9,12 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
- .env
+.env
+
+# model checkpoints and datasets (large binaries — transfer manually)
+checkpoints/
+data/
+
+# experiment logs
+wandb/
+logs/

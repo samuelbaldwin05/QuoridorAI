@@ -55,6 +55,7 @@ from agents.ppo_model_bfs_resnet import PPOModelBFSResNet
 from config import (
     EVAL_EPISODES,
     EVAL_FREQ,
+    FENCE_GRID,
     NUM_CHANNELS_BFS,
     OPPONENT_UPDATE_FREQ,
     PPO_CLIP_EPS,
@@ -115,11 +116,22 @@ class PPOBot:
 
         action = index_to_action(action_idx)
 
+        # The observation was returned from the current player's perspective:
+        # when game.turn == 1 the board is flipped (rows 0↔8) before the model
+        # sees it. That flip is applied inside game.get_observation(), so the
+        # model's direction deltas and fence rows are in flipped space.
+        # We must un-flip them here before resolving to actual board coordinates.
+        flip = (game.turn == 1)
+
         # index_to_action returns ("move", dr, dc) with direction deltas, but
         # _dispatch_bot_action (like HeuristicBot) expects ("move", dest_r, dest_c)
         # with absolute board coordinates. Resolve the direction to a destination.
         if action[0] == "move":
             _, dr, dc = action
+            # Vertical axis is flipped when flip=True (np.flipud): negate dr.
+            # Columns are not affected by flipud, so dc is unchanged.
+            if flip:
+                dr = -dr
             cur_r = int(game.pos[game.turn, 0])
             cur_c = int(game.pos[game.turn, 1])
             for dest_r, dest_c in game.get_valid_moves():
@@ -129,7 +141,14 @@ class PPOBot:
             # Fallback: move forward toward goal (should not occur with valid mask)
             return ("move", cur_r + dr, cur_c + dc)
 
-        return action  # fence and pass actions need no conversion
+        if action[0] == "fence":
+            _, r, c, ori = action
+            # Fence rows in flipped space map to actual row = FENCE_GRID - 1 - r.
+            if flip:
+                r = FENCE_GRID - 1 - r
+            return ("fence", r, c, ori)
+
+        return action  # pass action needs no conversion
 
 
 # ---------------------------------------------------------------------------
