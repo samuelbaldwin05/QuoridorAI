@@ -21,9 +21,9 @@ beginners in deep RL with solid Python + ML backgrounds — keep explanations ac
 > actively mislead future sessions. Update performance numbers, known issues, and the best checkpoint
 > whenever they change.
 
-**Phase:** Transitioning to PPO — DQN was abandoned after 500k episodes at 0% win rate
+**Phase:** PPO training — actively running. All infrastructure complete; first serious run in progress.
 **Branch:** `agent_jeff`
-**Best checkpoint:** `final_500000.pt` (DQN, 500k episodes — not used for PPO)
+**Best checkpoint:** `checkpoints/bc_pretrained_bfs_resnet.pt` — BC warm-start for next/current run
 **Experiment tracking:** W&B / TensorBoard — actively used
 
 ### Performance
@@ -31,7 +31,8 @@ beginners in deep RL with solid Python + ML backgrounds — keep explanations ac
 |---|---|---|---|
 | DQN | Random bot | ~100% | Consistently wins |
 | DQN | Heuristic bot | **0%** | Abandoned — fundamental ceiling hit |
-| PPO | Heuristic bot | Not yet trained | Four model variants ready to experiment |
+| PPO (500k steps) | Heuristic bot | **0%** | Diagnosed: actor_head bug + entropy collapse |
+| PPO (fresh restart) | Heuristic bot | Not yet measured | Bugs fixed; first real run underway |
 
 ### PPO Model Variants (ready to run)
 All four variants are drop-in replaceable via `--model` flag in `train_ppo.py`:
@@ -41,9 +42,26 @@ All four variants are drop-in replaceable via `--model` flag in `train_ppo.py`:
 | `baseline` | `ppo_model.py` | 4 | 2-conv + BatchNorm | Original — use as control |
 | `resnet` | `ppo_model_resnet.py` | 4 | ResNet + LayerNorm | Residual blocks, no BFS |
 | `bfs` | `ppo_model_bfs.py` | 6 | 2-conv + LayerNorm | BFS distance maps, no residual |
-| `bfs_resnet` | `ppo_model_bfs_resnet.py` | 6 | ResNet + LayerNorm | Full combo — start here |
+| `bfs_resnet` | `ppo_model_bfs_resnet.py` | 6 | ResNet + LayerNorm | **Full combo — primary model** |
 
-Run experiments: `python -m scripts.train_ppo --model bfs_resnet --no-wandb`
+**Auxiliary prediction head (implemented, bfs_resnet only):**
+`ppo_model_bfs_resnet.py` has a third output from `forward()`: `aux_pred (B, 2)` predicting
+`[my_dist_to_goal, opp_dist_to_goal]`. Targets are derived for free by dot-producting the BFS
+channel maps (ch4, ch5) with the one-hot pawn channels (ch0, ch1). Adds `AUX_LOSS_COEF * MSE`
+to the total loss. W&B key: `train/aux_loss` — should decrease quickly; if it stays high, the
+backbone is not learning path distances.
+Non-BFS models return 2 values from `forward()`; `_model_forward()` in `train_ppo.py` pads with
+`None` so all call sites unpack 3 values uniformly.
+
+### Recommended training command
+```bash
+python -m scripts.train_ppo \
+    --model bfs_resnet \
+    --opponent pool \
+    --reward-shaping \
+    --checkpoint checkpoints/bc_pretrained_bfs_resnet.pt \
+    --value-burnin-steps 10000
+```
 
 ### Known Issues — Prioritized
 1. **0% DQN win rate (root cause: state representation)** — The 4-channel state gives no direct
@@ -52,21 +70,29 @@ Run experiments: `python -m scripts.train_ppo --model bfs_resnet --no-wandb`
    PPO + BFS channels directly address this.
 2. **Wall wastage** — DQN agent placed walls that don't meaningfully block the opponent. Expected to
    improve with BFS channels (model can directly see path-length effects of wall placement).
-3. **BC warm-start incompatibility with BFS models** — `bc_pretrained.pt` was generated from
-   4-channel observations. Loading it into `ppo_model_bfs.py` or `ppo_model_bfs_resnet.py` with
-   `strict=False` silently random-initializes the first conv layer (shape mismatch: 4-ch vs 6-ch).
-   The rest of the backbone loads correctly. To properly warm-start BFS models, regenerate BC data
-   with `use_bfs=True` in `generate_bc_data.py` and retrain. Not done yet.
-4. **BC abandonment undocumented** — The DQN BC pretraining was abandoned but the reason was never
-   recorded. Log it in `plan/decisions.md` before it's forgotten.
-5. **Slow training throughput** — Episode speed is a bottleneck. Profile before optimizing.
+3. **BC actor_head was silently discarded on load (NOW FIXED)** — The checkpoint loader
+   previously excluded `actor_head.*` from loading, meaning the BC-trained policy head was
+   thrown away and randomly reinitialized every time training started. The backbone loaded but
+   the policy started random → 0% eval win rate throughout the entire 500k PPO run.
+   Fixed: `_HEAD_PREFIXES` now only excludes `value_head.*`, `aux_head.*`, `fc.*`. For a PPO
+   BC checkpoint, `actor_head.*` is preserved. For a DQN checkpoint, `actor_head.*` is absent
+   so strict=False handles it as missing (randomly initialized) — no regression.
+   Verified: `bc_pretrained_bfs_resnet.pt` now loads 19/19 tensors including actor_head.
+4. **PPO entropy collapsed to 0.1–0.3 nats (NOW FIXED via config)** — After 500k steps, the
+   policy was near-deterministic (healthy range: 1–3 nats). Root cause: entropy coef of 0.05
+   was too weak when the policy found a deterministic strategy that won 40% of training games
+   by exploiting epsilon randomness. Fixed: `PPO_ENTROPY_COEF_START = 0.2`.
+5. **OpponentPool not compatible with --num-envs > 1** — `OpponentPool._current` is shared
+   instance state; interleaved resets from N envs clobber each other's sampled opponent.
+   Workaround: always use `--num-envs 1` (the default) when `--opponent pool`.
+6. **Slow training throughput** — Episode speed is a bottleneck. Profile before optimizing.
 
 ### Behavioral Cloning Status
-- `data/bc_data.npz` — 4-channel dataset from HeuristicBot self-play (exists, untracked)
-- `checkpoints/bc_pretrained.pt` — 4-channel DQN backbone checkpoint (exists, not actively used)
-- Scripts exist and work: `generate_bc_data.py`, `pretrain_bc.py`
-- **BC → PPO warm-start:** only safe for `baseline` and `resnet` variants (4-channel match)
-- **BC → BFS PPO warm-start:** requires regenerating dataset with `use_bfs=True` (not done)
+- `data/bc_data.npz` — 4-channel dataset (exists, untracked)
+- `data/bc_data_bfs.npz` — 6-channel dataset for BFS models (exists, untracked)
+- `checkpoints/bc_pretrained.pt` — DQN checkpoint with `conv.*` keys (incompatible with bfs_resnet)
+- `checkpoints/bc_pretrained_bfs_resnet.pt` — **exists and verified** (19 keys: backbone + actor_head)
+- **Checkpoint loader** excludes `value_head.*`, `aux_head.*`, `fc.*` only — actor_head is preserved for PPO BC checkpoints
 
 ---
 
@@ -148,15 +174,19 @@ BFS variant adds (when `QuoridorEnv(use_bfs=True)`):
   `next_state` is required for Double DQN's action selection step.
 
 ### PPO Phase (current)
-- **Entropy scheduling is implemented.** `PPO_ENTROPY_COEF_START=0.05` decays to
-  `PPO_ENTROPY_COEF_END=0.005` linearly over training. Without decay, the policy either explores
-  too randomly (never specializes) or collapses to movement-only (ignores 128 wall actions).
+- **Entropy scheduling is implemented.** `PPO_ENTROPY_COEF_START=0.2` decays to
+  `PPO_ENTROPY_COEF_END=0.01` linearly over training. Start high — previous value of 0.05 was
+  insufficient to prevent collapse to 0.1–0.3 nats. Healthy range mid-training: 1–3 nats.
+  Monitor `train/entropy`; if it stays below 0.5 the policy has collapsed regardless of win rate.
 - **Advantage normalization is per-rollout, not per-minibatch.** Normalized once in `main()` after
   `compute_gae()`. With sparse ±1 rewards, per-minibatch normalization amplifies noise from
   near-constant advantage mini-batches into fake gradient signal.
 - **Per-action-type entropy is logged every update.** W&B keys: `train/move_prob_mass`,
   `train/wall_prob_mass`, `train/move_entropy`, `train/wall_entropy`. `wall_prob_mass < 0.1`
   is the early warning for wall-action collapse — check this before looking at overall entropy.
+- **Auxiliary path-length head is active for bfs_resnet.** `forward()` returns 3 values
+  `(dist, value, aux_pred)`; non-BFS models return 2. `_model_forward()` in `train_ppo.py`
+  normalises this to always 3. `train/aux_loss` in W&B — should trend down quickly.
 - **Do NOT clip value loss.** Use simple MSE + global gradient clipping. Evidence shows value
   loss clipping hurts with sparse rewards.
 
@@ -165,8 +195,11 @@ BFS variant adds (when `QuoridorEnv(use_bfs=True)`):
   the agent can win occasionally — longer horizon doesn't help if there's no winning signal yet.
 - **PBRS reward shaping** — Φ(s) = α × (opp_path − my_path). Policy-invariant only in potential-
   difference form. Both potentials must use the acting player's perspective.
-- **Value head burn-in** — when BC warm-starting, run supervised regression on value head before
-  PPO fine-tuning begins. Skipping this can destroy the pretrained policy via garbage advantages.
+- **Value head burn-in** — **implemented.** Pass `--value-burnin-steps N --checkpoint path` to
+  freeze `actor_head.*` params for N env steps before PPO starts. The frozen BC actor generates
+  ~20% win-rate trajectories; only backbone + value head get gradients. After N steps, actor
+  unfreezes and full PPO resumes. W&B key: `burnin/value_loss` (tracks value head convergence
+  during burn-in). Suggested N: 10000. Only activates when `--checkpoint` is also provided.
 
 ---
 
@@ -181,39 +214,44 @@ QuoridorAI/
 ├── quoridor/                          ← game engine
 │   ├── __init__.py
 │   ├── game.py                        ← core rules, wall validation (touch carefully)
-│   ├── env.py                         ← Gym-compatible wrapper; use_bfs flag supported
+│   ├── env.py                         ← Gym-compatible wrapper; use_bfs + use_reward_shaping flags
+│   ├── vec_env.py                     ← synchronous N-env wrapper for parallel rollout collection
 │   ├── action_encoding.py             ← maps action indices ↔ game moves
 │   └── display.py                     ← board rendering / visualization
 │
 ├── agents/                            ← agent implementations
 │   ├── __init__.py
-│   ├── bot.py                         ← heuristic bot (training opponent)
+│   ├── bot.py                         ← HeuristicBot + EpsilonHeuristicBot (ε-greedy curriculum)
 │   ├── dqn_model.py                   ← CNN Q-network (DQN, 4-channel)
 │   ├── dqn_bot.py                     ← DQN agent wrapper
 │   ├── replay_buffer.py               ← experience replay buffer
 │   ├── random_bot.py                  ← random baseline agent
+│   ├── ppo_bot.py                     ← PPO checkpoint wrapper (for watch scripts / evaluation)
 │   ├── ppo_model.py                   ← PPO baseline: 4-ch CNN + BatchNorm
 │   ├── ppo_model_resnet.py            ← PPO resnet: 4-ch ResNet + LayerNorm
 │   ├── ppo_model_bfs.py               ← PPO bfs: 6-ch CNN + LayerNorm (BFS channels)
-│   └── ppo_model_bfs_resnet.py        ← PPO bfs_resnet: 6-ch ResNet + LayerNorm (recommended)
+│   └── ppo_model_bfs_resnet.py        ← PPO bfs_resnet: 6-ch ResNet + LayerNorm + aux head (primary)
 │
 ├── scripts/                           ← runnable entry points
 │   ├── train_dqn.py                   ← DQN training loop (deprecated — moved to PPO)
 │   ├── train_ppo.py                   ← PPO training loop; --model selects architecture
-│   ├── generate_bc_data.py            ← generate BC data (4-ch only; BFS version not built yet)
-│   ├── pretrain_bc.py                 ← BC pretraining for DQNModel only
+│   ├── watch_ppo.py                   ← terminal viewer: watch a PPO checkpoint play live
+│   ├── generate_bc_data.py            ← generate BC expert data (--bfs flag for 6-channel)
+│   ├── pretrain_bc.py                 ← BC pretraining; --model flag for all variants
 │   ├── play.py                        ← play interactively
 │   └── play_bot.py                    ← bot vs bot / human vs bot evaluation
 │
 ├── checkpoints/                       ← saved model weights (untracked)
 │   ├── bc_pretrained.pt               ← 4-ch BC checkpoint; usable for baseline/resnet PPO only
+│   ├── bc_pretrained_bfs_resnet.pt    ← 6-ch BC checkpoint; 19 keys incl. actor_head — use this
 │   ├── best.pt                        ← best DQN checkpoint during training
 │   └── final_500000.pt                ← final DQN checkpoint (500k episodes, 0% vs heuristic)
 │
 ├── data/
-│   └── bc_data.npz                    ← 4-channel BC dataset (untracked)
+│   ├── bc_data.npz                    ← 4-channel BC dataset (untracked)
+│   └── bc_data_bfs.npz               ← 6-channel BC dataset (untracked)
 │
-├── tests/                             ← pytest suite (61 tests, all passing)
+├── tests/                             ← pytest suite (136 passing, 2 pre-existing DQN failures)
 │   ├── test_action_encoding.py
 │   ├── test_dqn_model.py
 │   ├── test_env.py
@@ -233,9 +271,11 @@ QuoridorAI/
 ### Key Entry Points
 - **Game logic:** `quoridor/game.py` — touch carefully, rules must stay correct
 - **BFS distance map:** `game.py:bfs_distance_map(player)` — reverse multi-source BFS, returns `(9,9)` normalised float32
-- **Environment wrapper:** `quoridor/env.py` — `QuoridorEnv(use_bfs=True/False)`
+- **Environment wrapper:** `quoridor/env.py` — `QuoridorEnv(use_bfs=True/False, use_reward_shaping=True/False)`
+- **Vectorized env:** `quoridor/vec_env.py` — `VecQuoridorEnv(n_envs, bot, use_bfs, use_reward_shaping)`
 - **PPO training:** `scripts/train_ppo.py --model {baseline,resnet,bfs,bfs_resnet}`
 - **Model + env factory:** `train_ppo.py:build_model_and_env()` — always use this, never pair model and env manually
+- **Watch agent play:** `scripts/watch_ppo.py --checkpoint <path> --model bfs_resnet`
 - **Evaluation:** `scripts/play_bot.py` — run agent vs opponents
 - **Config:** `config.py` — change hyperparameters here, nowhere else
 
