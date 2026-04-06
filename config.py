@@ -29,7 +29,7 @@ NUM_RESIDUAL_BLOCKS = 2
 # Reward shaping coefficients. Applied only on non-terminal steps; terminal
 # rewards (+1/-1) remain pure so GAE advantage estimation is not distorted.
 #
-# shaped_reward = OPP_COEF  * (opp_path_before - opp_path_after)   [good wall]
+# shaped_reward = OPP_COEF  * (opp_path_after  - opp_path_before)  [good wall]
 #               + SELF_COEF * (my_path_before  - my_path_after)    [good pawn move]
 #
 # With ~12 pawn moves and ~4 wall placements per episode, cumulative shaped
@@ -97,15 +97,9 @@ EPSILON_DECAY_HEURISTIC = 0.99999
 # training budget
 MAX_STEPS = 500_000
 
-# evaluation
-EVAL_FREQ = 5_000
-EVAL_EPISODES = 20
-WIN_RATE_TARGET = 0.80
-
 # Evaluate win rate every N *env steps* (not gradient steps) so the frequency
 # is consistent regardless of when the replay buffer starts filling.
-EVAL_FREQ = 2_000       # was 1_000; halved to reduce eval overhead per training run
-
+EVAL_FREQ = 2_000       # was 5_000 → 1_000 → 2_000; halved to reduce eval overhead
 EVAL_EPISODES = 20      # was 50; fewer games per window, faster eval
 WIN_RATE_TARGET = 0.80  # graduation threshold to advance to PPO phase
 
@@ -132,9 +126,30 @@ PER_EPSILON = 1e-6
 # ---------------------------------------------------------------------------
 
 # Hard-copy online_net → frozen opponent every N env steps during self-play.
-# Too frequent = non-stationarity (DQN assumes stable target distribution).
+# Too frequent = non-stationarity (policy oscillates before converging vs current opp).
 # Too infrequent = agent quickly surpasses opponent, games become one-sided.
-OPPONENT_UPDATE_FREQ = 10_000
+# At ~30 plies/game and ROLLOUT_STEPS=512, 25k steps ≈ 833 games between syncs —
+# enough for the policy to converge against one opponent before seeing a new one.
+# Research: OpenAI Five saves every 20k–50k eps; AlphaGo Zero uses a 55% win-rate gate.
+OPPONENT_UPDATE_FREQ = 25_000
+
+# ---------------------------------------------------------------------------
+# Opponent pool (Fictitious Self-Play)
+# ---------------------------------------------------------------------------
+
+# Maximum number of past checkpoints kept in memory. Oldest entry dropped when full.
+# 5 checkpoints × 25k steps = strategies spanning ~125k steps of history, enough
+# diversity to prevent the cycling seen with a single frozen opponent.
+# Research: Neural FSP (Heinrich & Silver, 2016) — uniform pool sampling converges
+# to Nash. Full PFSP (AlphaStar) adds difficulty-weighting, overkill at this scale.
+OPPONENT_POOL_SIZE = 5
+
+# Fraction of episodes that sample HeuristicBot instead of a pool checkpoint.
+# Provides a stable non-moving anchor that prevents full collapse when all pool
+# checkpoints are still weak (inevitable early in training).
+# Research: OpenAI Five 80/20 latest-vs-historical split. Here the heuristic acts
+# as the "historical" anchor until enough strong checkpoints accumulate.
+OPPONENT_HEURISTIC_RATIO = 0.3
 
 # ---------------------------------------------------------------------------
 # N-step returns
@@ -165,30 +180,40 @@ PPO_EPOCHS = 2
 # Must be >= 32 for stable BatchNorm statistics.
 PPO_MINI_BATCH_SIZE = 64
 
-# Probability ratio clipping threshold. Prevents the policy from moving more
-# than ±20% away from the collection policy in a single update.
-PPO_CLIP_EPS = 0.2
+# Probability ratio clipping threshold.
+# Tightened from 0.2 → 0.1 for BC warm-start runs: 0.2 allowed the policy to
+# drift far enough from the BC distribution in the first few updates to erase
+# trained actor-head weights. 0.1 enforces a tighter trust region, preserving
+# BC knowledge while still allowing RL refinement.
+PPO_CLIP_EPS = 0.1
 
-# GAE smoothing parameter (lambda). 0.95 is close to Monte Carlo (λ=1) which
-# gives low bias at the cost of some variance — appropriate for Quoridor's
-# long episodes where accurate credit assignment requires long return horizons.
-PPO_GAE_LAMBDA = 0.95
+# GAE smoothing parameter (lambda). Combined with PPO_GAMMA=0.999, gives an
+# effective horizon of 1/(1-0.999*0.97) ≈ 34 steps — covering Quoridor's
+# 20-40 move games. Previous 0.95 gave ~17 steps, meaning wall placements in
+# the first half of the game received almost no gradient signal from terminal rewards.
+PPO_GAE_LAMBDA = 0.97
 
-# Discount factor — matches DQN GAMMA. High value needed for long-horizon
-# planning across 20-40 move games.
-PPO_GAMMA = 0.99
+# Discount factor. Raised from 0.99 → 0.999 so all moves across a 30-40 step
+# episode are weighted nearly equally. With 0.99, move 1 value is discounted
+# by 0.99^39 ≈ 0.67 relative to the terminal — too much for long-horizon planning.
+PPO_GAMMA = 0.999
 
 # Entropy regularization coefficient — scheduled, not fixed.
 # THE key hyperparameter preventing "always-lose collapse": penalizes the policy
 # for becoming deterministic, keeping it exploring even when all outcomes are -1.
 #
-# Start high (0.05) to prevent early wall-action collapse: without this, the
-# policy quickly assigns near-zero probability to all 128 wall placements and
-# only moves pawns. Decay to 0.005 so the policy can specialize once it has
-# learned which actions matter. train_ppo.py linearly interpolates between these
-# values over the full training run.
+# Raised from 0.05 → 0.2: the previous value was insufficient — training
+# collapsed to 0.1-0.3 nats (near-deterministic) while healthy range is 1-3 nats.
+# At 0.2, the entropy bonus dominates early training and forces genuine wall
+# exploration before the policy is allowed to specialise.
+# Decay to 0.01 so the policy can commit to a strategy once it has a win signal.
 PPO_ENTROPY_COEF_START = 0.05
-PPO_ENTROPY_COEF_END   = 0.005
+PPO_ENTROPY_COEF_END   = 0.01
+# Separate entropy coefficients for move vs wall actions.
+# Wall coef is lower because 128 wall actions naturally dominate the entropy
+# term — a single global coef pushes ~50% probability mass onto walls.
+PPO_MOVE_ENTROPY_COEF = 1.0   # multiplier on move-action entropy (relative to base coef)
+PPO_WALL_ENTROPY_COEF = 0.25  # multiplier on wall-action entropy (relative to base coef)
 
 # Weight on the value loss term. Keeps policy and value loss scales balanced.
 PPO_VALUE_COEF = 0.5
@@ -198,12 +223,51 @@ PPO_VALUE_COEF = 0.5
 # KL of 0.27-0.37 and destroyed the BC warmstart (20% win rate → 0%) within 2k steps.
 PPO_LR = 3e-5
 
-# Gradient norm clip — matches existing GRADIENT_CLIP_NORM.
-PPO_GRAD_CLIP = 10.0
+# Gradient norm clip. Tightened from 10.0 → 0.5: the previous value never
+# fired (observed grad_norm was 1-3), providing no protection. 0.5 is the
+# standard PPO recommendation and prevents large destructive updates
+# particularly in early training when loss landscape is steep.
+PPO_GRAD_CLIP = 0.5
 
 # Total env steps before stopping. PPO is more sample-efficient than DQN
 # (no replay buffer lag, on-policy data), so 500k should be a good first run.
-PPO_MAX_STEPS = 500_000
+PPO_MAX_STEPS = 1_000_000
+
+# ---------------------------------------------------------------------------
+# ε-greedy HeuristicBot curriculum
+# ---------------------------------------------------------------------------
+
+# EpsilonHeuristicBot replaces HeuristicBot during training when
+# --epsilon-curriculum is passed. With probability epsilon it takes a uniformly
+# random legal action; otherwise it delegates to HeuristicBot as normal.
+# This gives the agent winnable games early when it would otherwise never beat
+# a full-strength HeuristicBot, bootstrapping the positive reward signal needed
+# for PPO to learn.
+#
+# Annealing formula (applied at every eval cycle):
+#   epsilon = max(0.0, EPSILON_CURRICULUM_START * (1 - rolling_win_rate / THRESHOLD))
+#
+# At win_rate=0:     epsilon = 0.3  (bot is random 30% of the time)
+# At win_rate=0.6:   epsilon = 0.0  (full-strength HeuristicBot, curriculum complete)
+# Linear interpolation between — epsilon tracks the agent's progress.
+#
+# Rolling win rate is computed from the last 200 *training* episodes (not eval),
+# so this adapts to actual training performance, not just the eval snapshot.
+EPSILON_CURRICULUM_START     = 0.3   # initial epsilon (bot weakening)
+EPSILON_CURRICULUM_THRESHOLD = 0.6   # win rate at which epsilon reaches 0
+
+# ---------------------------------------------------------------------------
+# Auxiliary prediction heads
+# ---------------------------------------------------------------------------
+
+# Weight on the auxiliary path-length regression loss.
+# The aux head predicts [my_dist_to_goal, opp_dist_to_goal] from the shared
+# backbone encoding. Targets are derived for free from BFS channels already
+# stored in the rollout (ch4 * ch0 dot-product gives distance at pawn position).
+# Forces the backbone to build explicit path-distance representations, which
+# directly supports wall-placement reasoning.
+# Only active for BFS model variants (bfs, bfs_resnet). Non-BFS models ignore this.
+AUX_LOSS_COEF = 0.1
 
 # ---------------------------------------------------------------------------
 # Behavioral Cloning (BC) pretraining

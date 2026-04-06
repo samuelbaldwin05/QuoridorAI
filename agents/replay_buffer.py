@@ -1,9 +1,9 @@
 """
-replay_buffer.py — Experience replay buffers for the DQN agent.
+replay_buffer.py - Experience replay buffers for the DQN agent.
 
 Contains two implementations:
-    ReplayBuffer              — uniform random sampling (original)
-    PrioritizedReplayBuffer   — prioritized sampling via SumTree (PER)
+    ReplayBuffer              - uniform random sampling (original)
+    PrioritizedReplayBuffer   - prioritized sampling via SumTree (PER)
 
 Why experience replay? The DQN agent generates transitions sequentially during
 gameplay. Consecutive transitions are highly correlated (the board barely
@@ -17,7 +17,7 @@ of transitions have reward 0 and low TD error once the network stabilises. Unifo
 sampling buries rare high-value transitions (e.g. a wall placement that caused a
 win) in thousands of routine pawn-move transitions. PER samples high-TD-error
 transitions more frequently, so the network trains harder on the experiences it
-is most wrong about — exactly the wall-placement wins we need to amplify.
+is most wrong about - exactly the wall-placement wins we need to amplify.
 
 SumTree: a binary tree where each leaf stores a priority and each internal node
 stores the sum of its subtree. Supports O(log N) priority updates and O(log N)
@@ -76,7 +76,7 @@ class SumTree:
 
     def update(self, leaf_idx: int, priority: float) -> None:
         """
-        Set the priority for leaf at data position leaf_idx ∈ [0, capacity).
+        Set the priority for leaf at data position leaf_idx in [0, capacity).
         Propagates the delta up to the root.
         """
         tree_idx = leaf_idx + self.capacity - 1
@@ -102,7 +102,7 @@ class SumTree:
         Traverse the tree to find the leaf whose cumulative prefix sum first
         reaches s. s must be in [0, total).
 
-        Returns (leaf_idx, priority) where leaf_idx ∈ [0, capacity).
+        Returns (leaf_idx, priority) where leaf_idx is in [0, capacity).
         """
         idx = 0  # start at root
         while idx < self.capacity - 1:  # while not a leaf
@@ -118,24 +118,14 @@ class SumTree:
 
 
 # ---------------------------------------------------------------------------
-# Uniform replay buffer (original — kept for reference and non-PER runs)
+# Uniform replay buffer (original - kept for reference and non-PER runs)
 # ---------------------------------------------------------------------------
 
 class ReplayBuffer:
     """
     Fixed-capacity circular buffer storing DQN transitions.
-    Samples uniformly at random — no prioritization.
-
-    def __init__(self):
-        cap = REPLAY_BUFFER_SIZE
-        self._spatial      = np.zeros((cap, NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
-        self._scalars      = np.zeros((cap, NUM_SCALARS), dtype=np.float32)
-        self._actions      = np.zeros((cap,), dtype=np.int64)
-        self._rewards      = np.zeros((cap,), dtype=np.float32)
-        self._next_spatial = np.zeros((cap, NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
-        self._next_scalars = np.zeros((cap, NUM_SCALARS), dtype=np.float32)
-        self._dones        = np.zeros((cap,), dtype=bool)
-        self._next_legal_mask = np.zeros((cap, NUM_ACTIONS), dtype=bool)
+    Samples uniformly at random - no prioritization.
+    """
 
     def __init__(self) -> None:
         self._spatial         = np.zeros((REPLAY_BUFFER_SIZE, NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
@@ -195,12 +185,12 @@ class PrioritizedReplayBuffer:
     at least once before their actual TD error is known.
 
     Importance-sampling (IS) weights correct the bias introduced by non-uniform
-    sampling. Beta is annealed from PER_BETA_START → 1.0 over training; at
+    sampling. Beta is annealed from PER_BETA_START to 1.0 over training; at
     beta=1.0 the correction is exact, at beta=0 it is ignored entirely.
 
     Interface differences from ReplayBuffer:
-        sample(batch_size, beta)  — returns extra keys "weights" and "indices"
-        update_priorities(indices, td_errors)  — call after every training step
+        sample(batch_size, beta)  - returns extra keys "weights" and "indices"
+        update_priorities(indices, td_errors)  - call after every training step
     """
 
     def __init__(self) -> None:
@@ -251,8 +241,8 @@ class PrioritizedReplayBuffer:
 
         Returns:
             dict with all transition arrays plus:
-                "weights" : (B,) float32 — IS correction weights, max-normalised
-                "indices" : list[int]    — leaf indices for update_priorities()
+                "weights" : (B,) float32 - IS correction weights, max-normalised
+                "indices" : list[int]    - leaf indices for update_priorities()
         """
         if len(self) < batch_size:
             raise ValueError(f"Cannot sample {batch_size} from buffer of size {len(self)}.")
@@ -286,7 +276,7 @@ class PrioritizedReplayBuffer:
             "dones":           self._dones[idx],
             "next_legal_mask": self._next_legal_mask[idx],
             "weights":         weights,   # (B,) float32
-            "indices":         indices,   # list[int] — needed for update_priorities
+            "indices":         indices,   # list[int] - needed for update_priorities
         }
 
     def update_priorities(self, indices: list[int], td_errors: np.ndarray) -> None:
