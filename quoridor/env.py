@@ -12,14 +12,16 @@ import numpy as np
 from quoridor.game import QuoridorState
 from quoridor.action_encoding import NUM_ACTIONS, index_to_action
 from agents.bot import HeuristicBot
-from config import REWARD_SHAPING_OPP_COEF, REWARD_SHAPING_SELF_COEF
+from config import (INITIAL_WALLS_PER_PLAYER, REWARD_SHAPING_OPP_COEF,
+                     REWARD_SHAPING_SELF_COEF, STEP_PENALTY)
 
 
 _TERMINAL_MASK = np.zeros(NUM_ACTIONS, dtype=bool)
 
 
 class QuoridorEnv:
-    """Single-agent Quoridor environment. Agent=P0, bot=P1."""
+    """
+    Single-agent Quoridor environment.
 
     The agent always plays as P0 (bottom, goal = row 0). After each agent
     action, the env runs one bot turn as P1, then returns control.
@@ -79,15 +81,24 @@ class QuoridorEnv:
         # Measured after the agent's action but before the bot's response so the
         # reward reflects only what the agent did.
         #
-        # shaped_reward = OPP_COEF  * (opp_path_before - opp_path_after)  [good wall]
-        #               + SELF_COEF * (my_path_before  - my_path_after)   [good pawn]
+        # shaped_reward = OPP_COEF  * (opp_path_after - opp_path_before)  [good wall]
+        #               + SELF_COEF * (my_path_before  - my_path_after)  [good pawn]
         #
-        # Both terms are positive when good things happen and negative otherwise.
+        # Both terms are positive when good things happen:
+        #   - Good wall increases opp_path → opp_path_after > opp_path_before → positive
+        #   - Good pawn move decreases my_path → my_path_before > my_path_after → positive
+        # Note: pawn moves never change wall positions, so opp_path_after == opp_path_before
+        # for all pawn moves — the OPP_COEF term only fires on wall placements.
         if self.use_reward_shaping:
             my_path_after  = self.state.shortest_path(0)
             opp_path_after = self.state.shortest_path(1)
-            shaped_reward = (
-                REWARD_SHAPING_OPP_COEF  * (opp_path_before - opp_path_after) +
+            # Scale shaping by fraction of walls the agent still has.
+            # Teaches wall scarcity: burning walls early yields diminishing
+            # shaped reward, nudging the agent to conserve walls for when
+            # they matter most.
+            wall_frac = self.state.walls_left[0] / INITIAL_WALLS_PER_PLAYER
+            shaped_reward = wall_frac * (
+                REWARD_SHAPING_OPP_COEF  * (opp_path_after  - opp_path_before) +
                 REWARD_SHAPING_SELF_COEF * (my_path_before  - my_path_after)
             )
         else:
@@ -105,9 +116,12 @@ class QuoridorEnv:
             return spatial, scalars, -1.0, True, {"legal_mask": _TERMINAL_MASK.copy()}
 
         # ── 6. Non-terminal transition ───────────────────────────────────────
+        # STEP_PENALTY is a small negative reward applied every non-terminal step
+        # to discourage stalling. Applied on top of (or instead of) shaping reward.
+        # Terminal rewards remain pure ±1.0.
         spatial, scalars = self.state.get_observation(use_bfs=self.use_bfs)  # turn is back to P0
         next_mask = self.state.get_legal_mask()
-        return spatial, scalars, shaped_reward, False, {"legal_mask": next_mask}
+        return spatial, scalars, shaped_reward + STEP_PENALTY, False, {"legal_mask": next_mask}
 
     def get_legal_mask(self):
         """Passthrough to state.get_legal_mask()."""
