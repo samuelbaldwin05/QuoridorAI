@@ -2,7 +2,10 @@ import random
 from collections import deque
 from heapq import heappush, heappop
 
+import numpy as np
+
 from quoridor.game import QuoridorState, BOARD_SIZE, FENCE_GRID
+from quoridor.action_encoding import index_to_action
 
 """
 Rule-based Quoridor agent with heuristic evaluation.
@@ -505,9 +508,94 @@ class HeuristicBot:
         return best
 
     @staticmethod
-    def _fence_squares(fr, fc):
+    def _fence_squares(fr, fc) -> list[tuple[int, int]]:
         """The four board squares a fence at grid position (fr, fc) touches."""
         return [
             (fr, fc), (fr, fc + 1),
             (fr + 1, fc), (fr + 1, fc + 1),
         ]
+
+
+# ---------------------------------------------------------------------------
+# ε-greedy curriculum wrapper
+# ---------------------------------------------------------------------------
+
+class EpsilonHeuristicBot:
+    """
+    ε-greedy wrapper around HeuristicBot for curriculum training.
+
+    With probability epsilon, takes a uniformly random legal action.
+    Otherwise delegates to the wrapped HeuristicBot unchanged.
+
+    This gives the PPO agent a stream of winnable games early in training when
+    it would otherwise never beat a full-strength HeuristicBot — bootstrapping
+    the positive reward signal that PPO needs to learn. As the agent improves,
+    epsilon is annealed toward 0 by the training loop, gradually restoring
+    full-strength opposition.
+
+    The wrapped HeuristicBot is not modified — EpsilonHeuristicBot is a pure
+    proxy. Swapping the epsilon attribute is sufficient to update the difficulty
+    without rebuilding the environment.
+
+    Parameters
+    ----------
+    epsilon : float
+        Initial probability of taking a random action in [0, 1].
+        Typically starts at EPSILON_CURRICULUM_START (0.3) and decays to 0
+        as the agent's rolling win rate approaches EPSILON_CURRICULUM_THRESHOLD.
+    """
+
+    def __init__(self, epsilon: float = 0.3) -> None:
+        self._heuristic = HeuristicBot()
+        self.epsilon    = epsilon  # mutable — updated in-place by training loop
+
+    def reset(self) -> None:
+        """Delegate to wrapped HeuristicBot."""
+        self._heuristic.reset()
+
+    def choose_action(self, game) -> tuple:
+        """
+        Choose an action for the current player.
+
+        With probability epsilon: uniformly random legal action.
+        Otherwise: HeuristicBot's action.
+
+        The random fallback uses the legal mask to sample only valid actions,
+        then resolves direction deltas for pawn moves to absolute coordinates —
+        the same logic used by env._apply_index() and PPOBot._decode().
+
+        Returns
+        -------
+        tuple
+            Either ("move", row, col) or ("fence", row, col, orientation).
+        """
+        if random.random() < self.epsilon:
+            return self._random_legal_action(game)
+        return self._heuristic.choose_action(game)
+
+    def _random_legal_action(self, game) -> tuple:
+        """Sample uniformly from all legal actions and return an absolute action tuple."""
+        legal_mask    = game.get_legal_mask()
+        legal_indices = np.where(legal_mask)[0]
+        idx           = int(np.random.choice(legal_indices))
+        action        = index_to_action(idx)
+
+        if action[0] != "move":
+            return action  # fence/pass — already in absolute form
+
+        # Resolve direction delta → absolute board coordinates.
+        # index_to_action returns ("move", dr, dc); the env and all bots expect
+        # ("move", dest_r, dest_c) with absolute coordinates. Scan get_valid_moves()
+        # for any destination whose direction sign matches the decoded delta.
+        dr, dc = action[1], action[2]
+        cur_r  = int(game.pos[game.turn, 0])
+        cur_c  = int(game.pos[game.turn, 1])
+
+        for dest_r, dest_c in game.get_valid_moves():
+            if (np.sign(dest_r - cur_r) == np.sign(dr)
+                    and np.sign(dest_c - cur_c) == np.sign(dc)):
+                return ("move", dest_r, dest_c)
+
+        # Fallback: should not occur if the legal mask is correct.
+        dest_r, dest_c = game.get_valid_moves()[0]
+        return ("move", dest_r, dest_c)
