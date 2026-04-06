@@ -106,8 +106,10 @@ class PPOBot:
         scalars_t = torch.tensor(scalars).unsqueeze(0).to(self.device)     # (1, 2)
         mask_t    = torch.tensor(legal_mask).unsqueeze(0).to(self.device)  # (1, 137)
 
+        # bfs_resnet returns (dist, value, aux_pred); other models return (dist, value).
+        # Unpack with * to handle both.
         with torch.no_grad():
-            dist, _ = self.model(spatial_t, scalars_t, mask_t)
+            dist, *_ = self.model(spatial_t, scalars_t, mask_t)
             if self.greedy:
                 action_idx = int(dist.probs.argmax(dim=-1).item())
             else:

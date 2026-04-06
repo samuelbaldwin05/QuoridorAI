@@ -101,12 +101,17 @@ def train(
     The value_head is frozen before this function is called (for PPO models),
     so only backbone + actor_head parameters are in the optimizer.
     """
-    # Freeze value_head for PPO models — no supervision signal for value targets.
+    # Freeze output heads that have no BC supervision signal.
+    # value_head: no value targets in BC data (only expert actions).
+    # aux_head:   path-length regression head added to bfs/bfs_resnet — no
+    #             explicit aux loss in the BC loop, so it would get zero gradient
+    #             anyway; freezing keeps it out of the optimizer cleanly.
     # Must happen before constructing the optimizer so frozen params are excluded.
     is_ppo = model_name in _PPO_MODELS
     if is_ppo:
+        _BC_FREEZE = ("value_head.", "aux_head.")
         for name, param in model.named_parameters():
-            if name.startswith("value_head"):
+            if any(name.startswith(p) for p in _BC_FREEZE):
                 param.requires_grad = False
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -137,11 +142,13 @@ def train(
 
         for spatial, scalars, legal_masks, actions in dataloader:
             if is_ppo:
-                # PPO forward returns (Categorical, value_tensor).
+                # PPO forward returns (Categorical, value_tensor) for most models,
+                # or (Categorical, value_tensor, aux_pred) for bfs/bfs_resnet.
+                # *_ discards any extra return values so this works for both.
                 # dist.logits = log_softmax(masked_raw_logits) — already normalized.
                 # F.nll_loss(log_probs, targets) = -log_probs[targets] = cross-entropy.
                 # Do NOT use F.cross_entropy here — it would apply log_softmax twice.
-                dist, _ = model(spatial, scalars, legal_masks)   # (Categorical, (B,1))
+                dist, *_ = model(spatial, scalars, legal_masks)  # (Categorical, ...)
                 log_probs = dist.logits                          # (B, 137)
                 loss  = F.nll_loss(log_probs, actions)
                 preds = log_probs.argmax(dim=1)                  # (B,)

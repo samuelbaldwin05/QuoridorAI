@@ -19,6 +19,8 @@ Architecture:
         Linear(5186→256) → ReLU → Linear(256→137) → masked logits → Categorical
     Value head:
         Linear(5186→256) → ReLU → Linear(256→1)
+    Auxiliary head:
+        Linear(5186→2) — predicts [my_dist_to_goal, opp_dist_to_goal] (both in [0,1])
 
 Usage:
     Must be paired with QuoridorEnv(use_bfs=True).
@@ -110,6 +112,14 @@ class PPOModelBFSResNet(nn.Module):
             nn.Linear(FC_HIDDEN_SIZE, 1),
         )
 
+        # Auxiliary regression head: predicts [my_dist_to_goal, opp_dist_to_goal].
+        # Targets come free from BFS channels already in the observation — no extra
+        # env calls needed. The supervised signal forces the shared backbone to build
+        # explicit path-distance representations, which are exactly what wall
+        # placement reasoning requires. Single linear layer is intentionally shallow:
+        # the backbone should do the work, not this head.
+        self.aux_head = nn.Linear(_FC_IN_SIZE, 2)
+
     def _encode(
         self,
         spatial: torch.Tensor,  # (B, 6, 9, 9)
@@ -126,13 +136,16 @@ class PPOModelBFSResNet(nn.Module):
         spatial: torch.Tensor,    # (B, 6, 9, 9)
         scalars: torch.Tensor,    # (B, 2)
         legal_mask: torch.Tensor, # (B, 137) bool
-    ) -> tuple[Categorical, torch.Tensor]:
+    ) -> tuple[Categorical, torch.Tensor, torch.Tensor]:
         """
-        Full actor-critic forward pass. Identical interface to PPOModel.forward().
+        Full actor-critic forward pass with auxiliary path-length prediction.
 
         Returns:
-            dist:  Categorical over legal actions.
-            value: Scalar value estimate, shape (B, 1).
+            dist:     Categorical over legal actions.
+            value:    Scalar value estimate, shape (B, 1).
+            aux_pred: Predicted [my_dist_to_goal, opp_dist_to_goal], shape (B, 2).
+                      Values are in [0, 1] (normalised by BFS_NORM_FACTOR).
+                      Supervised against targets extracted from ch4/ch5 of spatial.
         """
         fused = self._encode(spatial, scalars)                        # (B, 5186)
 
@@ -140,8 +153,9 @@ class PPOModelBFSResNet(nn.Module):
         masked_logits = raw_logits.masked_fill(~legal_mask, _ILLEGAL_LOGIT)
         dist          = Categorical(logits=masked_logits)
 
-        value = self.value_head(fused)                                # (B, 1)
-        return dist, value
+        value    = self.value_head(fused)                             # (B, 1)
+        aux_pred = self.aux_head(fused)                               # (B, 2)
+        return dist, value, aux_pred
 
     def get_value(
         self,
