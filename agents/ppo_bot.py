@@ -18,7 +18,31 @@ from agents.ppo_model import PPOModel
 from agents.ppo_model_bfs import PPOModelBFS
 from agents.ppo_model_bfs_resnet import PPOModelBFSResNet
 from agents.ppo_model_resnet import PPOModelResNet
-from quoridor.action_encoding import index_to_action
+from quoridor.action_encoding import (
+    index_to_action, FENCE_GRID, H_WALL_OFFSET, V_WALL_OFFSET,
+)
+
+# Maps flipped-space move action index → actual-space move action index.
+# np.flipud negates dr but leaves dc unchanged, so:
+#   up(0) ↔ down(1), left(2)/right(3) stay, NW(4)↔SW(6), NE(5)↔SE(7).
+_MOVE_FLIP = [1, 0, 2, 3, 6, 7, 4, 5]
+
+
+def _flip_legal_mask(mask: np.ndarray) -> np.ndarray:
+    """Remap a legal mask from actual board coords to flipped (P1) coords."""
+    flipped = np.zeros_like(mask)
+    for flipped_idx, actual_idx in enumerate(_MOVE_FLIP):
+        flipped[flipped_idx] = mask[actual_idx]
+    for r in range(FENCE_GRID):
+        actual_r = FENCE_GRID - 1 - r
+        for c in range(FENCE_GRID):
+            flipped[H_WALL_OFFSET + r * FENCE_GRID + c] = (
+                mask[H_WALL_OFFSET + actual_r * FENCE_GRID + c]
+            )
+            flipped[V_WALL_OFFSET + r * FENCE_GRID + c] = (
+                mask[V_WALL_OFFSET + actual_r * FENCE_GRID + c]
+            )
+    return flipped
 
 # Maps --model names to (ModelClass, use_bfs). Mirrors the registry in train_ppo.py.
 _MODEL_REGISTRY: dict = {
@@ -74,7 +98,7 @@ class PPOBot:
 
         # Support both full training checkpoints and raw state_dicts.
         ckpt       = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
-        state_dict = ckpt.get("model_state_dict", ckpt)
+        state_dict = ckpt.get("model", ckpt.get("model_state_dict", ckpt))
         self.model.load_state_dict(state_dict)
         self.model.eval()
 
@@ -90,8 +114,9 @@ class PPOBot:
         ----------
         game : QuoridorState
             Current game state. The action is chosen for game.turn.
-            get_observation() and get_legal_mask() are called on this state,
-            so the observation is always from the current player's perspective.
+            get_observation() returns a perspective-normalized view (flipped
+            for P1). The legal mask must be flipped to match, then the decoded
+            action must be un-flipped back to actual board coordinates.
 
         Returns
         -------
@@ -99,8 +124,13 @@ class PPOBot:
             Either ("move", row, col) with absolute board coordinates,
             or ("fence", row, col, orientation).
         """
+        flip = (game.turn == 1)
+
         spatial, scalars = game.get_observation(use_bfs=self.use_bfs)
         legal_mask       = game.get_legal_mask()
+        # Flip legal mask to match the flipped observation for P1.
+        if flip:
+            legal_mask = _flip_legal_mask(legal_mask)
 
         spatial_t = torch.tensor(spatial).unsqueeze(0).to(self.device)     # (1, C, 9, 9)
         scalars_t = torch.tensor(scalars).unsqueeze(0).to(self.device)     # (1, 2)
@@ -115,24 +145,29 @@ class PPOBot:
             else:
                 action_idx = int(dist.sample().item())
 
-        return self._decode(action_idx, game)
+        return self._decode(action_idx, game, flip)
 
-    def _decode(self, idx: int, game) -> tuple:
+    def _decode(self, idx: int, game, flip: bool = False) -> tuple:
         """
         Convert an action index to a concrete game action tuple.
 
-        Fence actions are already in absolute (row, col) form. Move actions
-        encode a direction delta — we scan get_valid_moves() for any destination
-        whose direction sign matches. This correctly handles both 1-step advances
-        and 2-step straight jumps (same sign). Identical logic to env._apply_index().
+        When flip=True (P1), the model selected in flipped space — move
+        directions must be negated (dr → -dr) and fence rows must be
+        un-flipped (r → FENCE_GRID-1-r) to get actual board coordinates.
         """
         action = index_to_action(idx)
 
         if action[0] == "fence":
-            return action  # ("fence", row, col, orientation) — already absolute
+            _, r, c, ori = action
+            if flip:
+                r = FENCE_GRID - 1 - r
+            return ("fence", r, c, ori)
 
         # Resolve direction delta → absolute destination.
         dr, dc = action[1], action[2]
+        # Flip negates row direction: model's "up" is actual "down" for P1.
+        if flip:
+            dr = -dr
         cur_r  = int(game.pos[game.turn, 0])
         cur_c  = int(game.pos[game.turn, 1])
 

@@ -23,19 +23,22 @@ from quoridor.display import render
 from quoridor.game import QuoridorState
 
 
+MAX_PLIES = 300  # match env.py move limit
+
+
 def play_game(
     agent:    PPOBot,
     opponent,
     delay:    float = 0.3,
     quiet:    bool  = False,
-) -> tuple[int, int]:
+) -> tuple[int | None, int]:
     """
     Play one complete game: PPO agent as P0, opponent as P1.
 
     Returns
     -------
-    (winner, move_count) : tuple[int, int]
-        winner is 0 (agent) or 1 (opponent).
+    (winner, move_count) : tuple[int | None, int]
+        winner is 0 (agent), 1 (opponent), or None (draw by move limit).
         move_count is the total number of half-moves (plies) in the game.
     """
     game = QuoridorState()
@@ -43,7 +46,7 @@ def play_game(
     opponent.reset()
     move_count = 0
 
-    while not game.done:
+    while not game.done and move_count < MAX_PLIES:
         if not quiet:
             # \033[2J clears the screen; \033[H moves cursor to top-left.
             print("\033[2J\033[H", end="")
@@ -67,11 +70,14 @@ def play_game(
     if not quiet:
         print("\033[2J\033[H", end="")
         print(render(game))
-        winner_name = "Agent (P0)" if game.winner == 0 else "Opponent (P1)"
-        print(f"\n{winner_name} wins in {move_count} plies!")
+        if game.done:
+            winner_name = "Agent (P0)" if game.winner == 0 else "Opponent (P1)"
+            print(f"\n{winner_name} wins in {move_count} plies!")
+        else:
+            print(f"\nDraw — move limit ({MAX_PLIES}) reached!")
         time.sleep(delay * 3)
 
-    return game.winner, move_count
+    return (game.winner if game.done else None), move_count
 
 
 def main() -> None:
@@ -90,8 +96,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--opponent", default="heuristic",
-        choices=["heuristic", "random"],
-        help="Opponent the agent faces",
+        choices=["heuristic", "random", "ppo"],
+        help="Opponent the agent faces. 'ppo' requires --opponent-checkpoint.",
+    )
+    parser.add_argument(
+        "--opponent-checkpoint",
+        default=None,
+        help="Path to a PPO checkpoint for the opponent (used with --opponent ppo)",
+    )
+    parser.add_argument(
+        "--opponent-model", default="bfs_resnet",
+        choices=["baseline", "resnet", "bfs", "bfs_resnet"],
+        help="Model architecture for the PPO opponent — must match its checkpoint",
     )
     parser.add_argument(
         "--games", type=int, default=5,
@@ -114,7 +130,15 @@ def main() -> None:
         greedy=args.greedy,
     )
 
-    if args.opponent == "heuristic":
+    if args.opponent == "ppo":
+        if not args.opponent_checkpoint:
+            parser.error("--opponent ppo requires --opponent-checkpoint")
+        opponent = PPOBot(
+            checkpoint_path=args.opponent_checkpoint,
+            model_type=args.opponent_model,
+            greedy=False,  # sample so opponent isn't deterministic
+        )
+    elif args.opponent == "heuristic":
         opponent = HeuristicBot()
     else:
         opponent = RandomBot()
@@ -135,7 +159,7 @@ def main() -> None:
             wins += 1
         total_plies += plies
 
-        result = "WIN" if winner == 0 else "loss"
+        result = "WIN" if winner == 0 else ("draw" if winner is None else "loss")
         print(f"  Game {i + 1:2d}/{args.games}  [{result}]  {plies} plies  "
               f"— Agent wins so far: {wins}/{i + 1}")
 

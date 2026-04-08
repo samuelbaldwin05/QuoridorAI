@@ -70,6 +70,12 @@ TARGET_UPDATE_FREQ = 500
 GRADIENT_CLIP_NORM = 10.0
 STEP_PENALTY = -0.01   # small penalty per step to discourage stalling
 
+# Penalty applied each time the agent revisits a pawn position it has already
+# occupied this episode. Scales with visit count: penalty = REPETITION_PENALTY * (visits - 1).
+# Discourages oscillation (moving back and forth) which is the #1 failure mode
+# when two memoryless policies face each other. Set to 0.0 to disable.
+REPETITION_PENALTY = -0.03
+
 # replay buffer
 REPLAY_BUFFER_SIZE = 50_000
 
@@ -149,7 +155,7 @@ OPPONENT_POOL_SIZE = 5
 # checkpoints are still weak (inevitable early in training).
 # Research: OpenAI Five 80/20 latest-vs-historical split. Here the heuristic acts
 # as the "historical" anchor until enough strong checkpoints accumulate.
-OPPONENT_HEURISTIC_RATIO = 0.3
+OPPONENT_HEURISTIC_RATIO = 0.4
 
 # ---------------------------------------------------------------------------
 # N-step returns
@@ -207,7 +213,7 @@ PPO_GAMMA = 0.999
 # At 0.2, the entropy bonus dominates early training and forces genuine wall
 # exploration before the policy is allowed to specialise.
 # Decay to 0.01 so the policy can commit to a strategy once it has a win signal.
-PPO_ENTROPY_COEF_START = 0.05
+PPO_ENTROPY_COEF_START = 0.2
 PPO_ENTROPY_COEF_END   = 0.01
 # Separate entropy coefficients for move vs wall actions.
 # Wall coef is lower because 128 wall actions naturally dominate the entropy

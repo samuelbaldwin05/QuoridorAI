@@ -77,6 +77,8 @@ from config import (
     PPO_MAX_STEPS,
     PPO_MINI_BATCH_SIZE,
     PPO_VALUE_COEF,
+    REWARD_SHAPING_OPP_COEF,
+    REWARD_SHAPING_SELF_COEF,
     ROLLOUT_STEPS,
     SEED,
     WIN_RATE_TARGET,
@@ -137,6 +139,7 @@ def _model_forward(
     spatial: torch.Tensor,
     scalars: torch.Tensor,
     mask: torch.Tensor,
+    temperature: float = 1.0,
 ) -> tuple:
     """
     Uniform forward-pass wrapper that always returns (dist, value, aux_pred).
@@ -144,12 +147,27 @@ def _model_forward(
     BFS models (bfs, bfs_resnet) return 3 values natively; non-BFS models return 2.
     This wrapper pads with None so all call sites can unpack 3 values without
     knowing which model variant is running.
+
+    temperature: scales logits before building the Categorical distribution.
+    >1.0 flattens the distribution (more exploration), <1.0 sharpens it.
+    Only meaningful during rollout collection — pass 1.0 during PPO updates.
     """
     result = model(spatial, scalars, mask)
     if len(result) == 3:
-        return result           # BFS model: (dist, value, aux_pred)
-    dist, value = result
-    return dist, value, None    # non-BFS model: no aux head
+        dist, value, aux_pred = result
+    else:
+        dist, value = result
+        aux_pred = None
+
+    # Apply temperature scaling to the logits if T != 1.0.
+    # This preserves action ranking but widens the probability spread,
+    # encouraging the agent to try plausible alternative moves.
+    if temperature != 1.0:
+        from torch.distributions import Categorical
+        scaled_logits = dist.logits / temperature
+        dist = Categorical(logits=scaled_logits)
+
+    return dist, value, aux_pred
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +185,11 @@ class PPOBot:
     this wrapper works with both 4-channel and 6-channel model variants.
     """
 
-    def __init__(self, model: torch.nn.Module, device: torch.device) -> None:
+    def __init__(self, model: torch.nn.Module, device: torch.device,
+                 temperature: float = 1.0) -> None:
         self.model  = model
         self.device = device
+        self.temperature = temperature
         # Detect whether this model expects 6-channel (BFS) or 4-channel input.
         first_weight = next(iter(model.parameters()))
         self.use_bfs = (first_weight.shape[1] == NUM_CHANNELS_BFS)
@@ -198,7 +218,8 @@ class PPOBot:
         m  = torch.tensor(legal_mask, dtype=torch.bool   ).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            dist, _, _aux = _model_forward(self.model, s, sc, m)
+            dist, _, _aux = _model_forward(self.model, s, sc, m,
+                                           temperature=self.temperature)
             action_idx = int(dist.sample().item())
 
         # action is decoded in flipped (model) space; translate back to actual coords.
@@ -274,11 +295,13 @@ class OpponentPool:
         device:           torch.device,
         heuristic_ratio:  float = OPPONENT_HEURISTIC_RATIO,
         max_size:         int   = OPPONENT_POOL_SIZE,
+        opponent_temperature: float = 1.0,
     ) -> None:
         self.model_type      = model_type
         self.device          = device
         self.heuristic_ratio = heuristic_ratio
         self.max_size        = max_size
+        self.opponent_temperature = opponent_temperature
         # Each entry is a frozen PPOBot wrapping a deepcopy of the model at that point.
         self._pool: list     = []
         self._heuristic      = HeuristicBot()
@@ -293,9 +316,28 @@ class OpponentPool:
         """
         frozen = copy.deepcopy(model)
         frozen.eval()
-        self._pool.append(PPOBot(frozen, self.device))
+        self._pool.append(PPOBot(frozen, self.device,
+                                 temperature=self.opponent_temperature))
         if len(self._pool) > self.max_size:
             self._pool.pop(0)  # evict oldest — FIFO
+
+    def fork(self) -> "OpponentPool":
+        """Create a lightweight copy that shares the checkpoint pool.
+
+        Each fork has its own _current opponent, so multiple envs can call
+        reset()/choose_action() without clobbering each other's state.
+        Used by VecQuoridorEnv to give each sub-env an independent pool view.
+        """
+        child = OpponentPool.__new__(OpponentPool)
+        child.model_type      = self.model_type
+        child.device          = self.device
+        child.heuristic_ratio = self.heuristic_ratio
+        child.max_size        = self.max_size
+        child.opponent_temperature = self.opponent_temperature
+        child._pool           = self._pool      # shared list — add() on parent updates all forks
+        child._heuristic      = HeuristicBot()  # each fork gets its own heuristic instance
+        child._current        = child._heuristic
+        return child
 
     def reset(self) -> None:
         """
@@ -307,11 +349,8 @@ class OpponentPool:
         gradient estimation.
         """
         if not self._pool or random.random() < self.heuristic_ratio:
-            # No pool yet, or heuristic selected by ratio — use the stable anchor.
             self._current = self._heuristic
         else:
-            # Uniform sampling: each past checkpoint is equally likely.
-            # Prevents the agent from over-specialising against its latest self.
             self._current = random.choice(self._pool)
         self._current.reset()
 
@@ -323,6 +362,45 @@ class OpponentPool:
     def pool_size(self) -> int:
         """Current number of checkpoint entries in the pool (excludes heuristic)."""
         return len(self._pool)
+
+
+class MixedOpponentPool(OpponentPool):
+    """Per-move mixed opponent: each action is independently sampled from
+    either HeuristicBot (with probability heuristic_ratio) or a random pool
+    checkpoint (with probability 1 - heuristic_ratio).
+
+    Unlike OpponentPool which picks ONE opponent per game, this mixes styles
+    within a single game. The opponent might play a heuristic move, then a
+    self-play move, then another heuristic move. This creates diverse board
+    states that neither pure opponent would produce alone, forcing the agent
+    to handle unexpected mid-game transitions.
+    """
+
+    def reset(self) -> None:
+        """Reset all pool bots. No per-episode opponent selection needed."""
+        self._heuristic.reset()
+        for bot in self._pool:
+            bot.reset()
+
+    def choose_action(self, game) -> tuple:
+        """Per-move sampling: heuristic with probability heuristic_ratio,
+        otherwise a random pool checkpoint."""
+        if not self._pool or random.random() < self.heuristic_ratio:
+            return self._heuristic.choose_action(game)
+        return random.choice(self._pool).choose_action(game)
+
+    def fork(self) -> "MixedOpponentPool":
+        """Create a lightweight copy that shares the checkpoint pool."""
+        child = MixedOpponentPool.__new__(MixedOpponentPool)
+        child.model_type      = self.model_type
+        child.device          = self.device
+        child.heuristic_ratio = self.heuristic_ratio
+        child.max_size        = self.max_size
+        child.opponent_temperature = self.opponent_temperature
+        child._pool           = self._pool      # shared list
+        child._heuristic      = HeuristicBot()
+        child._current        = child._heuristic
+        return child
 
 
 # ---------------------------------------------------------------------------
@@ -344,8 +422,12 @@ def build_model_and_env(
     model_type:          str,
     bot,
     device:              torch.device,
-    use_reward_shaping:  bool = False,
-    n_envs:              int  = 1,
+    use_reward_shaping:  bool  = False,
+    n_envs:              int   = 1,
+    reward_self_coef:    float = None,
+    reward_opp_coef:     float = None,
+    randomize_start:     bool  = False,
+    repetition_penalty:  float = None,
 ) -> tuple:
     """
     Instantiate the correct model and vectorized environment pair.
@@ -361,6 +443,8 @@ def build_model_and_env(
                             Eval env is never shaped so win rate is comparable.
         n_envs:             Number of parallel environments (default 1).
                             n_envs=1 is identical to the single-env code path.
+        reward_self_coef:   Override for REWARD_SHAPING_SELF_COEF (None = use config default).
+        reward_opp_coef:    Override for REWARD_SHAPING_OPP_COEF (None = use config default).
 
     Returns:
         (model, vec_train_env, eval_env)
@@ -372,8 +456,15 @@ def build_model_and_env(
         )
     ModelClass, use_bfs = _MODEL_REGISTRY[model_type]
     model    = ModelClass().to(device)
-    env      = VecQuoridorEnv(n_envs=n_envs, bot=bot, use_bfs=use_bfs, use_reward_shaping=use_reward_shaping)
-    eval_env = QuoridorEnv(bot=HeuristicBot(), use_bfs=use_bfs, use_reward_shaping=False)
+    env      = VecQuoridorEnv(n_envs=n_envs, bot=bot, use_bfs=use_bfs,
+                              use_reward_shaping=use_reward_shaping,
+                              reward_self_coef=reward_self_coef,
+                              reward_opp_coef=reward_opp_coef,
+                              randomize_start=randomize_start,
+                              repetition_penalty=repetition_penalty)
+    # Eval env: no shaping, no randomized start, no repetition penalty — clean measurement.
+    eval_env = QuoridorEnv(bot=HeuristicBot(), use_bfs=use_bfs, use_reward_shaping=False,
+                           repetition_penalty=0.0)
     return model, env, eval_env
 
 
@@ -388,6 +479,7 @@ def collect_rollout(
     device: torch.device,
     spatial: np.ndarray,
     scalars: np.ndarray,
+    temperature: float = 1.0,
 ) -> tuple[dict, np.ndarray, np.ndarray, bool]:
     """
     Run the current policy for rollout_steps environment steps.
@@ -427,9 +519,15 @@ def collect_rollout(
             spatial_t = torch.tensor(spatial).unsqueeze(0).to(device)      # (1, 4, 9, 9)
             scalars_t = torch.tensor(scalars).unsqueeze(0).to(device)      # (1, 2)
             mask_t    = torch.tensor(legal_mask).unsqueeze(0).to(device)   # (1, 137)
-            dist, value, _aux = _model_forward(model, spatial_t, scalars_t, mask_t)
+            dist, value, _aux = _model_forward(model, spatial_t, scalars_t, mask_t,
+                                                   temperature=temperature)
             action    = dist.sample()                                       # (1,)
-            log_prob  = dist.log_prob(action)                               # (1,)
+            # Log-prob at T=1.0 so PPO ratios are unbiased by temperature.
+            if temperature != 1.0:
+                dist_base, _, _ = _model_forward(model, spatial_t, scalars_t, mask_t)
+                log_prob = dist_base.log_prob(action)                       # (1,)
+            else:
+                log_prob  = dist.log_prob(action)                           # (1,)
 
         action_int = int(action.item())
 
@@ -473,6 +571,7 @@ def collect_rollout_vec(
     device:        torch.device,
     spatial:       np.ndarray,  # (N, C, 9, 9)
     scalars:       np.ndarray,  # (N, 2)
+    temperature:   float = 1.0,
 ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
     """
     Collect steps_per_env steps from each of N parallel envs.
@@ -516,9 +615,15 @@ def collect_rollout_vec(
             spatial_t = torch.tensor(spatial,    dtype=torch.float32).to(device)  # (N, C, 9, 9)
             scalars_t = torch.tensor(scalars,    dtype=torch.float32).to(device)  # (N, 2)
             mask_t    = torch.tensor(legal_mask, dtype=torch.bool    ).to(device)  # (N, 137)
-            dist, value, _aux = _model_forward(model, spatial_t, scalars_t, mask_t)
+            dist, value, _aux = _model_forward(model, spatial_t, scalars_t, mask_t,
+                                                   temperature=temperature)
             action   = dist.sample()                             # (N,)
-            log_prob = dist.log_prob(action)                     # (N,)
+            # Log-prob at T=1.0 so PPO ratios are unbiased by temperature.
+            if temperature != 1.0:
+                dist_base, _, _ = _model_forward(model, spatial_t, scalars_t, mask_t)
+                log_prob = dist_base.log_prob(action)            # (N,)
+            else:
+                log_prob = dist.log_prob(action)                 # (N,)
 
         action_arr = action.cpu().numpy().astype(np.int32)       # (N,)
 
@@ -951,7 +1056,13 @@ def main(use_wandb: bool, args) -> None:
         bot = epsilon_bot
     else:
         bot = HeuristicBot()
-    model, env, eval_env_obj = build_model_and_env(args.model, bot, device, args.reward_shaping, args.num_envs)
+    model, env, eval_env_obj = build_model_and_env(
+        args.model, bot, device, args.reward_shaping, args.num_envs,
+        reward_self_coef=args.reward_self_coef,
+        reward_opp_coef=args.reward_opp_coef,
+        randomize_start=args.randomize_start,
+        repetition_penalty=args.repetition_penalty,
+    )
     steps_per_env = args.rollout_steps // args.num_envs
     print(f"Model: {args.model}  |  BFS env: {_MODEL_REGISTRY[args.model][1]}  |  "
           f"Opponent: {args.opponent}  |  Reward shaping: {args.reward_shaping}  |  "
@@ -972,10 +1083,11 @@ def main(use_wandb: bool, args) -> None:
               f"Updates every {OPPONENT_UPDATE_FREQ} steps.")
     elif args.opponent == "pool":
         pool = OpponentPool(
-            model_type      = args.model,
-            device          = device,
-            heuristic_ratio = OPPONENT_HEURISTIC_RATIO,
-            max_size        = OPPONENT_POOL_SIZE,
+            model_type           = args.model,
+            device               = device,
+            heuristic_ratio      = OPPONENT_HEURISTIC_RATIO,
+            max_size             = OPPONENT_POOL_SIZE,
+            opponent_temperature = args.temperature,
         )
         # If epsilon curriculum is active, replace the pool's internal heuristic
         # with the epsilon-wrapped version so the heuristic fraction of pool
@@ -984,6 +1096,20 @@ def main(use_wandb: bool, args) -> None:
             pool._heuristic = epsilon_bot
         env.bot = pool
         print(f"Opponent pool: heuristic_ratio={OPPONENT_HEURISTIC_RATIO}, "
+              f"max_size={OPPONENT_POOL_SIZE}, "
+              f"sync_every={OPPONENT_UPDATE_FREQ} steps.")
+    elif args.opponent == "mixed":
+        pool = MixedOpponentPool(
+            model_type           = args.model,
+            device               = device,
+            heuristic_ratio      = OPPONENT_HEURISTIC_RATIO,
+            max_size             = OPPONENT_POOL_SIZE,
+            opponent_temperature = args.temperature,
+        )
+        if epsilon_bot is not None:
+            pool._heuristic = epsilon_bot
+        env.bot = pool
+        print(f"Mixed opponent: per-move sampling, heuristic_ratio={OPPONENT_HEURISTIC_RATIO}, "
               f"max_size={OPPONENT_POOL_SIZE}, "
               f"sync_every={OPPONENT_UPDATE_FREQ} steps.")
 
@@ -1008,7 +1134,15 @@ def main(use_wandb: bool, args) -> None:
     # strict=False handles any remaining shape or name mismatches gracefully.
     _HEAD_PREFIXES = ("value_head.", "aux_head.", "fc.")
     if args.checkpoint is not None:
-        bc_state   = torch.load(args.checkpoint, map_location=device)
+        bc_raw     = torch.load(args.checkpoint, map_location=device)
+        # Support both full training checkpoints (dict with "model" key) and
+        # raw state_dicts (from torch.save(model.state_dict(), path)).
+        if isinstance(bc_raw, dict) and "model" in bc_raw:
+            bc_state = bc_raw["model"]
+        elif isinstance(bc_raw, dict) and "model_state_dict" in bc_raw:
+            bc_state = bc_raw["model_state_dict"]
+        else:
+            bc_state = bc_raw
         to_load    = {k: v for k, v in bc_state.items()
                       if not any(k.startswith(p) for p in _HEAD_PREFIXES)}
         missing, unexpected = model.load_state_dict(to_load, strict=False)
@@ -1068,6 +1202,7 @@ def main(use_wandb: bool, args) -> None:
 
     # --- Training state ---
     total_steps      = 0
+    start_step       = 0   # step at which this run began (>0 when resuming)
     best_win_rate    = 0.0
     graduated        = False
     rolling_win_rate = 0.0  # epsilon curriculum rolling win rate; updated at each eval
@@ -1112,6 +1247,7 @@ def main(use_wandb: bool, args) -> None:
         # Restore training position.
         restored_steps   = ckpt["total_steps"]
         total_steps      = restored_steps
+        start_step       = restored_steps
         rolling_win_rate = ckpt["rolling_win_rate"]
 
         # Pre-fill training_outcomes so the epsilon curriculum doesn't reset to
@@ -1147,8 +1283,8 @@ def main(use_wandb: bool, args) -> None:
                 "epsilon_curriculum":       args.epsilon_curriculum,
                 "epsilon_curriculum_start": EPSILON_CURRICULUM_START     if args.epsilon_curriculum else None,
                 "epsilon_curriculum_thr":   EPSILON_CURRICULUM_THRESHOLD if args.epsilon_curriculum else None,
-                "opponent_pool_size":       OPPONENT_POOL_SIZE   if args.opponent == "pool" else None,
-                "heuristic_ratio":          OPPONENT_HEURISTIC_RATIO if args.opponent == "pool" else None,
+                "opponent_pool_size":       OPPONENT_POOL_SIZE   if args.opponent in ("pool", "mixed") else None,
+                "heuristic_ratio":          OPPONENT_HEURISTIC_RATIO if args.opponent in ("pool", "mixed") else None,
                 "opponent_update_freq":     OPPONENT_UPDATE_FREQ,
                 "device":             str(device),
                 "checkpoint":           args.checkpoint,
@@ -1202,7 +1338,8 @@ def main(use_wandb: bool, args) -> None:
 
             # 1. Collect rollout — (T, N, ...) tensors, T = steps_per_env
             rollout, spatial, scalars, last_dones = collect_rollout_vec(
-                model, env, steps_per_env, device, spatial, scalars
+                model, env, steps_per_env, device, spatial, scalars,
+                temperature=args.temperature,
             )
             # rollout["rewards"]: (T, N), rollout["dones"]: (T, N), etc.
 
@@ -1268,9 +1405,13 @@ def main(use_wandb: bool, args) -> None:
             # 5. Entropy coefficient — linearly decayed over training.
             # High early to prevent wall-action collapse; low late to allow
             # the policy to specialise once it has learned which actions matter.
+            # Uses progress since start_step so resumed runs get the full
+            # entropy schedule over their additional_steps budget.
+            steps_since_start = total_steps - start_step
+            total_budget = args.max_steps - start_step
             entropy_coef = PPO_ENTROPY_COEF_START + (
                 PPO_ENTROPY_COEF_END - PPO_ENTROPY_COEF_START
-            ) * min(1.0, total_steps / args.max_steps)
+            ) * min(1.0, steps_since_start / total_budget)
 
             # 6. PPO update — uses args.grad_clip so CLI override works.
             metrics = ppo_update(
@@ -1287,7 +1428,7 @@ def main(use_wandb: bool, args) -> None:
             #   self_play — update the single frozen model in-place.
             #   pool      — snapshot the current model and add it to the pool.
             #               The pool's heuristic anchor remains unchanged.
-            if (args.opponent in ("self_play", "pool")
+            if (args.opponent in ("self_play", "pool", "mixed")
                     and total_steps // OPPONENT_UPDATE_FREQ > prev_steps // OPPONENT_UPDATE_FREQ):
                 if args.opponent == "self_play":
                     frozen_model.load_state_dict(copy.deepcopy(model.state_dict()))
@@ -1296,12 +1437,13 @@ def main(use_wandb: bool, args) -> None:
                     print(f"[self_play] Opponent synced at step {total_steps}")
                 else:
                     pool.add(model)
-                    print(f"[pool] Checkpoint added at step {total_steps} "
+                    label = "mixed" if args.opponent == "mixed" else "pool"
+                    print(f"[{label}] Checkpoint added at step {total_steps} "
                           f"(pool size: {pool.pool_size}/{OPPONENT_POOL_SIZE})")
                 if use_wandb:
                     import wandb
                     log = {"train/self_play_sync": total_steps}
-                    if args.opponent == "pool":
+                    if args.opponent in ("pool", "mixed"):
                         log["train/pool_size"] = pool.pool_size
                     wandb.log(log, step=total_steps)
 
@@ -1389,18 +1531,20 @@ def main(use_wandb: bool, args) -> None:
 
                 if win_rate > best_win_rate:
                     best_win_rate = win_rate
+                    best_name = f"checkpoints/best_{args.run_name}.pt" if args.run_name else "checkpoints/best_ppo.pt"
                     save_checkpoint(
-                        "checkpoints/best_ppo.pt",
+                        best_name,
                         model, optimizer, total_steps, args.max_steps, rolling_win_rate,
                     )
                     print(f"  ✓ New best win rate ({win_rate:.2%}) — checkpoint saved.")
 
-                if win_rate >= WIN_RATE_TARGET:
+                if win_rate >= WIN_RATE_TARGET and not args.no_graduate:
                     print(f"\nGraduated at step {total_steps}! Win rate: {win_rate:.2%}")
                     graduated = True
 
         # Normal completion
-        final_path = f"checkpoints/ppo_final_{total_steps}.pt"
+        run_tag = f"_{args.run_name}" if args.run_name else ""
+        final_path = f"checkpoints/ppo_final{run_tag}_{total_steps}.pt"
         save_checkpoint(
             final_path,
             model, optimizer, total_steps, args.max_steps, rolling_win_rate,
@@ -1410,7 +1554,8 @@ def main(use_wandb: bool, args) -> None:
 
     finally:
         # Always saves on normal exit, Ctrl+C, or crash.
-        emergency_path = f"checkpoints/ppo_emergency_{total_steps}.pt"
+        run_tag = f"_{args.run_name}" if args.run_name else ""
+        emergency_path = f"checkpoints/ppo_emergency{run_tag}_{total_steps}.pt"
         save_checkpoint(
             emergency_path,
             model, optimizer, total_steps, args.max_steps, rolling_win_rate,
@@ -1582,18 +1727,71 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--reward-self-coef",
+        type=float,
+        default=None,
+        dest="reward_self_coef",
+        help=f"Reward for agent moving closer to goal (default: {REWARD_SHAPING_SELF_COEF} from config). "
+             "Higher values teach 'advance toward goal' more strongly.",
+    )
+    parser.add_argument(
+        "--reward-opp-coef",
+        type=float,
+        default=None,
+        dest="reward_opp_coef",
+        help=f"Reward for lengthening opponent's path via walls (default: {REWARD_SHAPING_OPP_COEF} from config). "
+             "Higher values teach 'block opponent with walls' more strongly.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help=(
+            "Logit temperature for action sampling during rollout collection. "
+            ">1.0 flattens the policy distribution (more exploration of plausible "
+            "alternative moves), <1.0 sharpens it. Only affects rollout sampling — "
+            "the PPO update always uses T=1.0 so log-probs remain unbiased. "
+            "Try 1.5 for moderate exploration, 2.0 for aggressive. Default: 1.0."
+        ),
+    )
+    parser.add_argument(
+        "--no-graduate",
+        action="store_true",
+        dest="no_graduate",
+        help="Disable early stopping when win rate reaches the graduation threshold. "
+             "Training runs for the full step budget regardless of performance.",
+    )
+    parser.add_argument(
+        "--randomize-start",
+        action="store_true",
+        dest="randomize_start",
+        help="50%% of episodes the bot moves first, so the agent practises "
+             "responding to openings (effectively playing as P1 half the time).",
+    )
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        dest="repetition_penalty",
+        help="Penalty per revisit of a pawn position within an episode. "
+             "Scales with visit count: penalty * (visits-1). Default uses "
+             "config.REPETITION_PENALTY. Pass 0 to disable.",
+    )
+    parser.add_argument(
         "--opponent",
         type=str,
         default="heuristic",
-        choices=["heuristic", "self_play", "pool"],
+        choices=["heuristic", "self_play", "pool", "mixed"],
         help=(
             "Training opponent strategy. "
             "'heuristic': always train vs HeuristicBot (default, most stable). "
             "'self_play': train vs a frozen copy of self (AlphaZero style), "
             f"updated every OPPONENT_UPDATE_FREQ={OPPONENT_UPDATE_FREQ} steps. "
-            "'pool': Fictitious Self-Play — mix of HeuristicBot (30%% of episodes) "
-            "and a rolling window of past checkpoints (70%%), updated at the same "
-            "frequency. Prevents cycling while maintaining a stable anchor. "
+            "'pool': Fictitious Self-Play — picks one opponent per game: HeuristicBot "
+            "(heuristic_ratio%% of games) or a random past checkpoint. "
+            "'mixed': Per-move mixed — each move independently sampled from "
+            "HeuristicBot (heuristic_ratio%%) or a random past checkpoint. Creates "
+            "diverse mid-game transitions that neither pure opponent would produce. "
             "Eval always uses HeuristicBot regardless of this flag."
         ),
     )

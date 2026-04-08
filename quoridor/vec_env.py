@@ -57,16 +57,34 @@ class VecQuoridorEnv:
         self,
         n_envs:             int,
         bot,
-        use_bfs:            bool = False,
-        use_reward_shaping: bool = False,
+        use_bfs:            bool  = False,
+        use_reward_shaping: bool  = False,
+        reward_self_coef:   float = None,
+        reward_opp_coef:    float = None,
+        randomize_start:    bool  = False,
+        repetition_penalty: float = None,
     ) -> None:
         self.n_envs = n_envs
-        # All envs share the same bot object — updates to bot attributes (like
-        # epsilon) propagate without any bookkeeping in the training loop.
-        self.envs = [
-            QuoridorEnv(bot=bot, use_bfs=use_bfs, use_reward_shaping=use_reward_shaping)
-            for _ in range(n_envs)
-        ]
+        # If the bot supports fork() (e.g. OpponentPool), give each env its own
+        # fork so they don't clobber each other's per-episode state. The forks
+        # share the underlying checkpoint pool, so add() on the parent propagates.
+        # For simple bots (HeuristicBot, PPOBot), all envs share the same object.
+        # Build optional kwargs for reward shaping coefficients.
+        extra_kwargs = {}
+        if reward_self_coef is not None:
+            extra_kwargs["reward_self_coef"] = reward_self_coef
+        if reward_opp_coef is not None:
+            extra_kwargs["reward_opp_coef"] = reward_opp_coef
+        if repetition_penalty is not None:
+            extra_kwargs["repetition_penalty"] = repetition_penalty
+        self.envs = []
+        for _ in range(n_envs):
+            env_bot = bot.fork() if hasattr(bot, "fork") else bot
+            self.envs.append(
+                QuoridorEnv(bot=env_bot, use_bfs=use_bfs,
+                            use_reward_shaping=use_reward_shaping,
+                            randomize_start=randomize_start, **extra_kwargs)
+            )
         self._bot = bot  # keep a direct reference for the property setter below
 
     # ------------------------------------------------------------------
@@ -83,7 +101,7 @@ class VecQuoridorEnv:
     def bot(self, value) -> None:
         self._bot = value
         for env in self.envs:
-            env.bot = value
+            env.bot = value.fork() if hasattr(value, "fork") else value
 
     # ------------------------------------------------------------------
     # Core interface
