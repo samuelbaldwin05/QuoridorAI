@@ -11,6 +11,9 @@ __pycache__/
 Thumbs.db
 .env
 
+# testing
+.pytest_cache/
+
 # model checkpoints and datasets (large binaries — transfer manually)
 checkpoints/
 data/

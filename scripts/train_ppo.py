@@ -1297,8 +1297,8 @@ def main(use_wandb: bool, args) -> None:
                 "clip_eps":              PPO_CLIP_EPS,
                 "gae_lambda":            args.lam,
                 "gamma":                 args.gamma,
-                "entropy_coef_start":    PPO_ENTROPY_COEF_START,
-                "entropy_coef_end":      PPO_ENTROPY_COEF_END,
+                "entropy_coef_start":    args.entropy_start if args.entropy_start is not None else PPO_ENTROPY_COEF_START,
+                "entropy_coef_end":      args.entropy_end if args.entropy_end is not None else PPO_ENTROPY_COEF_END,
                 "value_coef":            PPO_VALUE_COEF,
                 "aux_loss_coef":         AUX_LOSS_COEF,
                 "lr":                    PPO_LR,
@@ -1409,8 +1409,10 @@ def main(use_wandb: bool, args) -> None:
             # entropy schedule over their additional_steps budget.
             steps_since_start = total_steps - start_step
             total_budget = args.max_steps - start_step
-            entropy_coef = PPO_ENTROPY_COEF_START + (
-                PPO_ENTROPY_COEF_END - PPO_ENTROPY_COEF_START
+            ent_start = args.entropy_start if args.entropy_start is not None else PPO_ENTROPY_COEF_START
+            ent_end   = args.entropy_end   if args.entropy_end   is not None else PPO_ENTROPY_COEF_END
+            entropy_coef = ent_start + (
+                ent_end - ent_start
             ) * min(1.0, steps_since_start / total_budget)
 
             # 6. PPO update — uses args.grad_clip so CLI override works.
@@ -1741,6 +1743,23 @@ if __name__ == "__main__":
         dest="reward_opp_coef",
         help=f"Reward for lengthening opponent's path via walls (default: {REWARD_SHAPING_OPP_COEF} from config). "
              "Higher values teach 'block opponent with walls' more strongly.",
+    )
+    parser.add_argument(
+        "--entropy-start",
+        type=float,
+        default=None,
+        dest="entropy_start",
+        help=f"Override PPO_ENTROPY_COEF_START (default: {PPO_ENTROPY_COEF_START} from config). "
+             "Higher = more forced exploration early in training.",
+    )
+    parser.add_argument(
+        "--entropy-end",
+        type=float,
+        default=None,
+        dest="entropy_end",
+        help=f"Override PPO_ENTROPY_COEF_END (default: {PPO_ENTROPY_COEF_END} from config). "
+             "Higher = policy stays stochastic even late in training. "
+             "Set equal to --entropy-start for constant (no decay).",
     )
     parser.add_argument(
         "--temperature",

@@ -1,173 +1,176 @@
 """
-watch.py — Watch a bot-vs-bot game with a configurable delay between moves.
+watch_ppo.py — Watch a trained PPO agent play Quoridor in the terminal.
+
+Loads a checkpoint, plays one or more complete games against a chosen
+opponent, and renders each board state with a configurable delay. Useful
+for quickly eyeballing whether the agent plays sensibly — does it advance
+its pawn? Does it place walls that actually obstruct the opponent?
 
 Usage:
-    python -m scripts.watch                           # HeuristicBot vs HeuristicBot
-    python -m scripts.watch --delay 1.0              # slower (1 second per move)
-    python -m scripts.watch --delay 0                # instant
-    python -m scripts.watch --p1 random              # Heuristic vs Random
-    python -m scripts.watch --p0 ppo --checkpoint checkpoints/best_ppo.pt --model bfs_resnet
+    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt
+    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt --model bfs_resnet
+    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt --games 3 --delay 0.5
+    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt --opponent random --no-greedy
 """
 
 import argparse
-import os
 import time
 
-from quoridor.game import QuoridorState
-from quoridor.display import render
 from agents.bot import HeuristicBot
+from agents.ppo_bot import PPOBot
 from agents.random_bot import RandomBot
+from quoridor.display import render
+from quoridor.game import QuoridorState
 
 
-def _clear() -> None:
-    os.system("cls" if os.name == "nt" else "clear")
+MAX_PLIES = 300  # match env.py move limit
 
 
-def _build_bot(name: str, args, player_idx: int):
-    """Instantiate a bot by name."""
-    if name == "heuristic":
-        return HeuristicBot()
-    if name == "random":
-        return RandomBot()
-    if name == "ppo":
-        if not args.checkpoint:
-            raise ValueError("--checkpoint is required when using --p0/--p1 ppo")
-        if not args.model:
-            raise ValueError("--model is required when using --p0/--p1 ppo")
-        import torch
-        from scripts.train_ppo import load_checkpoint, _MODEL_REGISTRY, _model_forward, _flip_legal_mask
-        from quoridor.action_encoding import index_to_action, FENCE_GRID
-        import numpy as np
+def play_game(
+    agent:    PPOBot,
+    opponent,
+    delay:    float = 0.3,
+    quiet:    bool  = False,
+) -> tuple[int | None, int]:
+    """
+    Play one complete game: PPO agent as P0, opponent as P1.
 
-        device = torch.device(
-            "cuda" if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available()
-            else "cpu"
-        )
-        ModelClass, use_bfs = _MODEL_REGISTRY[args.model]
-        model = ModelClass().to(device)
-        ckpt  = load_checkpoint(args.checkpoint, device)
-        model.load_state_dict(ckpt["model"])
-        model.eval()
-
-        class _PPOWatcher:
-            """Minimal PPO bot for watch.py — greedy (argmax) policy."""
-            def reset(self): pass
-            def choose_action(self, game):
-                flip = (game.turn == 1)
-                spatial, scalars = game.get_observation(use_bfs=use_bfs)
-                actual_mask = game.get_legal_mask()
-                legal_mask  = _flip_legal_mask(actual_mask) if flip else actual_mask
-
-                s  = torch.tensor(spatial,    dtype=torch.float32).unsqueeze(0).to(device)
-                sc = torch.tensor(scalars,    dtype=torch.float32).unsqueeze(0).to(device)
-                m  = torch.tensor(legal_mask, dtype=torch.bool   ).unsqueeze(0).to(device)
-
-                with torch.no_grad():
-                    dist, _, _ = _model_forward(model, s, sc, m)
-                    action_idx = int(dist.probs.argmax(dim=1).item())
-
-                action = index_to_action(action_idx)
-
-                if action[0] == "move":
-                    _, dr, dc = action
-                    if flip:
-                        dr = -dr
-                    cur_r = int(game.pos[game.turn, 0])
-                    cur_c = int(game.pos[game.turn, 1])
-                    for dest_r, dest_c in game.get_valid_moves():
-                        if (np.sign(dest_r - cur_r) == np.sign(dr)
-                                and np.sign(dest_c - cur_c) == np.sign(dc)):
-                            return ("move", dest_r, dest_c)
-                    raise ValueError(f"PPO watcher: no valid destination for action {action_idx}")
-
-                if action[0] == "fence":
-                    _, r, c, ori = action
-                    if flip:
-                        r = FENCE_GRID - 1 - r
-                    return ("fence", r, c, ori)
-
-                return action
-
-        return _PPOWatcher()
-
-    raise ValueError(f"Unknown bot '{name}'. Choose: heuristic, random, ppo")
-
-
-def run(args) -> None:
-    import numpy as np
+    Returns
+    -------
+    (winner, move_count) : tuple[int | None, int]
+        winner is 0 (agent), 1 (opponent), or None (draw by move limit).
+        move_count is the total number of half-moves (plies) in the game.
+    """
     game = QuoridorState()
-    bots = [
-        _build_bot(args.p0, args, player_idx=0),
-        _build_bot(args.p1, args, player_idx=1),
-    ]
-    bot_names = [args.p0.capitalize(), args.p1.capitalize()]
-    move_log: list[str] = []
-    move_num = 0
+    agent.reset()
+    opponent.reset()
+    move_count = 0
 
-    while not game.done:
-        _clear()
-        print(f"=== {bot_names[0]} (P0/bottom) vs {bot_names[1]} (P1/top) ===")
-        print(f"Move {move_num}")
-        print(render(game))
+    while not game.done and move_count < MAX_PLIES:
+        if not quiet:
+            # \033[2J clears the screen; \033[H moves cursor to top-left.
+            print("\033[2J\033[H", end="")
+            print(render(game))
+            who = "Agent (P0)" if game.turn == 0 else "Opponent (P1)"
+            print(f"\nPly {move_count}  |  {who} to move")
+            time.sleep(delay)
 
-        # Last few moves
-        if move_log:
-            print("\nRecent moves:")
-            for entry in move_log[-6:]:
-                print(f"  {entry}")
-
-        print(f"\n[delay={args.delay}s — Ctrl+C to quit]")
-        time.sleep(args.delay)
-
-        bot = bots[game.turn]
-        action = bot.choose_action(game)
+        if game.turn == 0:
+            action = agent.choose_action(game)
+        else:
+            action = opponent.choose_action(game)
 
         if action[0] == "move":
-            col_label = chr(ord("a") + int(action[2]))
-            row_label  = str(int(action[1]) + 1)
-            desc = f"P{game.turn} ({bot_names[game.turn]}) moves → {col_label}{row_label}"
             game.move_to(action[1], action[2])
-        elif action[0] == "fence":
-            col_label = chr(ord("a") + int(action[2]))
-            row_label  = str(int(action[1]) + 1)
-            desc = f"P{game.turn} ({bot_names[game.turn]}) places {action[3]} fence at {col_label}{row_label}"
-            game.place_fence(action[1], action[2], action[3])
         else:
-            desc = f"P{game.turn} passes"
+            game.place_fence(action[1], action[2], action[3])
 
-        move_log.append(f"#{move_num:>3}  {desc}")
-        move_num += 1
+        move_count += 1
 
-    # Final board
-    _clear()
-    print(f"=== {bot_names[0]} (P0) vs {bot_names[1]} (P1) ===")
-    print(f"Game over after {move_num} moves")
-    print(render(game))
-    print(f"\n{'='*40}")
-    print(f"Winner: P{game.winner} ({bot_names[game.winner]})")
-    print(f"\nFull move log:")
-    for entry in move_log:
-        print(f"  {entry}")
+    if not quiet:
+        print("\033[2J\033[H", end="")
+        print(render(game))
+        if game.done:
+            winner_name = "Agent (P0)" if game.winner == 0 else "Opponent (P1)"
+            print(f"\n{winner_name} wins in {move_count} plies!")
+        else:
+            print(f"\nDraw — move limit ({MAX_PLIES}) reached!")
+        time.sleep(delay * 3)
+
+    return (game.winner if game.done else None), move_count
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Watch a trained PPO agent play Quoridor.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--checkpoint", required=True,
+        help="Path to .pt checkpoint (e.g. checkpoints/ppo_best.pt)",
+    )
+    parser.add_argument(
+        "--model", default="bfs_resnet",
+        choices=["baseline", "resnet", "bfs", "bfs_resnet"],
+        help="Model architecture — must match the checkpoint",
+    )
+    parser.add_argument(
+        "--opponent", default="heuristic",
+        choices=["heuristic", "random", "ppo"],
+        help="Opponent the agent faces. 'ppo' requires --opponent-checkpoint.",
+    )
+    parser.add_argument(
+        "--opponent-checkpoint",
+        default=None,
+        help="Path to a PPO checkpoint for the opponent (used with --opponent ppo)",
+    )
+    parser.add_argument(
+        "--opponent-model", default="bfs_resnet",
+        choices=["baseline", "resnet", "bfs", "bfs_resnet"],
+        help="Model architecture for the PPO opponent — must match its checkpoint",
+    )
+    parser.add_argument(
+        "--games", type=int, default=5,
+        help="Number of games to play",
+    )
+    parser.add_argument(
+        "--delay", type=float, default=0.3,
+        help="Seconds to pause between plies",
+    )
+    parser.add_argument(
+        "--no-greedy", dest="greedy", action="store_false",
+        help="Sample from the action distribution instead of taking argmax",
+    )
+    parser.set_defaults(greedy=True)
+    args = parser.parse_args()
+
+    agent = PPOBot(
+        checkpoint_path=args.checkpoint,
+        model_type=args.model,
+        greedy=args.greedy,
+    )
+
+    if args.opponent == "ppo":
+        if not args.opponent_checkpoint:
+            parser.error("--opponent ppo requires --opponent-checkpoint")
+        opponent = PPOBot(
+            checkpoint_path=args.opponent_checkpoint,
+            model_type=args.opponent_model,
+            greedy=False,  # sample so opponent isn't deterministic
+        )
+    elif args.opponent == "heuristic":
+        opponent = HeuristicBot()
+    else:
+        opponent = RandomBot()
+
+    mode = "greedy" if args.greedy else "stochastic"
+    print(f"Agent    : PPO ({args.model}, {mode}) ← {args.checkpoint}")
+    print(f"Opponent : {args.opponent}")
+    print(f"Games    : {args.games}  |  Delay: {args.delay}s")
+    print()
+    input("Press Enter to start...\n")
+
+    wins       = 0
+    total_plies = 0
+
+    for i in range(args.games):
+        winner, plies = play_game(agent, opponent, delay=args.delay)
+        if winner == 0:
+            wins += 1
+        total_plies += plies
+
+        result = "WIN" if winner == 0 else ("draw" if winner is None else "loss")
+        print(f"  Game {i + 1:2d}/{args.games}  [{result}]  {plies} plies  "
+              f"— Agent wins so far: {wins}/{i + 1}")
+
+        if i < args.games - 1:
+            input("\nPress Enter for next game...\n")
+
+    avg_plies = total_plies / args.games
+    print(f"\n{'─' * 40}")
+    print(f"Final  : {wins}/{args.games}  ({100 * wins / args.games:.0f}% win rate)")
+    print(f"Avg    : {avg_plies:.1f} plies/game")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Watch a bot-vs-bot Quoridor game.")
-    parser.add_argument("--p0", type=str, default="heuristic",
-                        choices=["heuristic", "random", "ppo"],
-                        help="Bot for P0/bottom (default: heuristic).")
-    parser.add_argument("--p1", type=str, default="heuristic",
-                        choices=["heuristic", "random", "ppo"],
-                        help="Bot for P1/top (default: heuristic).")
-    parser.add_argument("--delay", type=float, default=0.5,
-                        help="Seconds to pause between moves (default: 0.5).")
-    parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Path to PPO checkpoint (required when --p0/--p1 ppo).")
-    parser.add_argument("--model", type=str, default=None,
-                        choices=["baseline", "resnet", "bfs", "bfs_resnet"],
-                        help="PPO model architecture (required when --p0/--p1 ppo).")
-    args = parser.parse_args()
-    try:
-        run(args)
-    except KeyboardInterrupt:
-        print("\nStopped.")
+    main()

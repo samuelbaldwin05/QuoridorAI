@@ -10,8 +10,8 @@ We are building a deep RL agent to play Quoridor from scratch, progressing throu
 This is both a learning project (beginner-level deep RL) and a serious performance goal. Code must be
 readable, well-commented, and correct. Clarity is never sacrificed for cleverness.
 
-**Solo developer.** Jeffrey is the only person writing code. All collaborators reviewing the project are
-beginners in deep RL with solid Python + ML backgrounds — keep explanations accessible.
+**Team:** Michael Maaseide, Sam Baldwin, Jeff Krapf, Dreshta Boghra (CS4100).
+All team members are beginners in deep RL with solid Python + ML backgrounds — keep explanations accessible.
 
 ---
 
@@ -21,18 +21,15 @@ beginners in deep RL with solid Python + ML backgrounds — keep explanations ac
 > actively mislead future sessions. Update performance numbers, known issues, and the best checkpoint
 > whenever they change.
 
-**Phase:** PPO training — actively running. All infrastructure complete; first serious run in progress.
-**Branch:** `agent_jeff`
-**Best checkpoint:** `checkpoints/bc_pretrained_bfs_resnet.pt` — BC warm-start for next/current run
-**Experiment tracking:** W&B / TensorBoard — actively used
+**Phase:** PPO training with self-play. DQN phase completed and abandoned (code removed).
+**Best checkpoint:** `checkpoints/best_mixed-v2.pt` — strongest generalist so far
+**Experiment tracking:** W&B / TensorBoard
 
 ### Performance
-| Agent | Opponent | Win Rate | Notes |
-|---|---|---|---|
-| DQN | Random bot | ~100% | Consistently wins |
-| DQN | Heuristic bot | **0%** | Abandoned — fundamental ceiling hit |
-| PPO (500k steps) | Heuristic bot | **0%** | Diagnosed: actor_head bug + entropy collapse |
-| PPO (fresh restart) | Heuristic bot | Not yet measured | Bugs fixed; first real run underway |
+| Agent | Opponent | Win Rate (P0) | Win Rate (P1) | Notes |
+|---|---|---|---|---|
+| best_mixed-v2 | Heuristic bot | ~85% | ~41% | Strong P0, weaker P1 |
+| best_mixed-v2 | Random bot | ~100% | ~100% | |
 
 ### PPO Model Variants (ready to run)
 All four variants are drop-in replaceable via `--model` flag in `train_ppo.py`:
@@ -57,42 +54,20 @@ Non-BFS models return 2 values from `forward()`; `_model_forward()` in `train_pp
 ```bash
 python -m scripts.train_ppo \
     --model bfs_resnet \
-    --opponent pool \
+    --opponent mixed \
     --reward-shaping \
-    --checkpoint checkpoints/bc_pretrained_bfs_resnet.pt \
-    --value-burnin-steps 10000
+    --randomize-start \
+    --checkpoint checkpoints/best_mixed-v2.pt \
+    --no-graduate \
+    --run-name my-run \
+    --max-steps 500000
 ```
 
-### Known Issues — Prioritized
-1. **0% DQN win rate (root cause: state representation)** — The 4-channel state gives no direct
-   signal about path lengths. The model had to infer from wall positions alone whether a wall was
-   strategically valuable — effectively impossible with sparse +1/-1 rewards over 30-40 move episodes.
-   PPO + BFS channels directly address this.
-2. **Wall wastage** — DQN agent placed walls that don't meaningfully block the opponent. Expected to
-   improve with BFS channels (model can directly see path-length effects of wall placement).
-3. **BC actor_head was silently discarded on load (NOW FIXED)** — The checkpoint loader
-   previously excluded `actor_head.*` from loading, meaning the BC-trained policy head was
-   thrown away and randomly reinitialized every time training started. The backbone loaded but
-   the policy started random → 0% eval win rate throughout the entire 500k PPO run.
-   Fixed: `_HEAD_PREFIXES` now only excludes `value_head.*`, `aux_head.*`, `fc.*`. For a PPO
-   BC checkpoint, `actor_head.*` is preserved. For a DQN checkpoint, `actor_head.*` is absent
-   so strict=False handles it as missing (randomly initialized) — no regression.
-   Verified: `bc_pretrained_bfs_resnet.pt` now loads 19/19 tensors including actor_head.
-4. **PPO entropy collapsed to 0.1–0.3 nats (NOW FIXED via config)** — After 500k steps, the
-   policy was near-deterministic (healthy range: 1–3 nats). Root cause: entropy coef of 0.05
-   was too weak when the policy found a deterministic strategy that won 40% of training games
-   by exploiting epsilon randomness. Fixed: `PPO_ENTROPY_COEF_START = 0.2`.
-5. **OpponentPool not compatible with --num-envs > 1** — `OpponentPool._current` is shared
-   instance state; interleaved resets from N envs clobber each other's sampled opponent.
-   Workaround: always use `--num-envs 1` (the default) when `--opponent pool`.
-6. **Slow training throughput** — Episode speed is a bottleneck. Profile before optimizing.
-
-### Behavioral Cloning Status
-- `data/bc_data.npz` — 4-channel dataset (exists, untracked)
-- `data/bc_data_bfs.npz` — 6-channel dataset for BFS models (exists, untracked)
-- `checkpoints/bc_pretrained.pt` — DQN checkpoint with `conv.*` keys (incompatible with bfs_resnet)
-- `checkpoints/bc_pretrained_bfs_resnet.pt` — **exists and verified** (19 keys: backbone + actor_head)
-- **Checkpoint loader** excludes `value_head.*`, `aux_head.*`, `fc.*` only — actor_head is preserved for PPO BC checkpoints
+### Known Issues
+1. **P0/P1 win rate imbalance** — Agent is much stronger as P0 than P1. `--randomize-start` helps but hasn't fully closed the gap.
+2. **Opening memorization** — Bot plays identical first 3 moves (e8→e7→e6) in ~100% of games. Walking forward is objectively correct; real diversity needed is in mid-game wall strategy.
+3. **OpponentPool not compatible with --num-envs > 1** — `OpponentPool._current` is shared instance state. Always use `--num-envs 1` (the default) with `--opponent pool` or `--opponent mixed`.
+4. **Catastrophic forgetting risk with high exploration** — Temperature 2.0 + entropy-end 0.1 caused complete policy collapse (explore-v1). Use moderate settings: temperature 1.2, entropy-end 0.02.
 
 ---
 
@@ -103,7 +78,7 @@ python -m scripts.train_ppo \
 - **Environment:** Custom Quoridor env built from scratch (Gym-compatible interface)
 - **Experiment tracking:** W&B / TensorBoard (active)
 - **Config:** `config.py` is the **single source of truth** for all hyperparameters
-- **Version control:** Git / GitHub — branch `agent_jeff`
+- **Version control:** Git / GitHub
 
 ### ⚠️ Config Drift — Known Tech Debt
 `config.py` is the intended single source of truth, but two files define constants independently:
@@ -162,16 +137,10 @@ BFS variant adds (when `QuoridorEnv(use_bfs=True)`):
 ### General (All Phases)
 - **Never train on illegal actions.** Action masking must be applied before every policy query.
 - **No data leakage:** Future observations must never appear in past transitions.
-- **Gradient clipping:** Always clip gradients. Current PPO uses `PPO_GRAD_CLIP = 10.0`.
-  A comparison run at 0.5 (tighter, more standard for PPO) is planned but not yet run.
-- **Rewards are sparse** (+1 win, -1 loss, 0 otherwise) unless PBRS shaping is enabled (TODO).
+- **Gradient clipping:** Always clip gradients. Current PPO uses `PPO_GRAD_CLIP = 0.5`.
+- **Rewards are sparse** (+1 win, -1 loss, 0 otherwise) unless reward shaping is enabled (`--reward-shaping`).
 - **Model ↔ env pairing:** BFS models (`bfs`, `bfs_resnet`) **must** use `QuoridorEnv(use_bfs=True)`.
   `build_model_and_env()` in `train_ppo.py` enforces this — never construct model and env separately.
-
-### DQN Phase (historical — abandoned)
-- **Target network updates:** Periodic hard updates (not soft). Frequency is a hyperparameter.
-- **Replay buffer:** Stores `(state, action, reward, next_state, done, legal_mask)`. Legal mask for
-  `next_state` is required for Double DQN's action selection step.
 
 ### PPO Phase (current)
 - **Entropy scheduling is implemented.** `PPO_ENTROPY_COEF_START=0.2` decays to
@@ -190,16 +159,14 @@ BFS variant adds (when `QuoridorEnv(use_bfs=True)`):
 - **Do NOT clip value loss.** Use simple MSE + global gradient clipping. Evidence shows value
   loss clipping hurts with sparse rewards.
 
-### PPO — Planned (not yet implemented, see `plan/ppo_techniques.md`)
-- **γ=0.999, λ=0.97** — longer effective horizon (~333 steps vs current ~100). Implement after
-  the agent can win occasionally — longer horizon doesn't help if there's no winning signal yet.
-- **PBRS reward shaping** — Φ(s) = α × (opp_path − my_path). Policy-invariant only in potential-
-  difference form. Both potentials must use the acting player's perspective.
-- **Value head burn-in** — **implemented.** Pass `--value-burnin-steps N --checkpoint path` to
-  freeze `actor_head.*` params for N env steps before PPO starts. The frozen BC actor generates
-  ~20% win-rate trajectories; only backbone + value head get gradients. After N steps, actor
-  unfreezes and full PPO resumes. W&B key: `burnin/value_loss` (tracks value head convergence
-  during burn-in). Suggested N: 10000. Only activates when `--checkpoint` is also provided.
+### PPO — Implemented Features
+- **γ=0.999, λ=0.97** — longer effective horizon covering full Quoridor episodes.
+- **Reward shaping** — path-length deltas: `OPP_COEF * Δopp_path + SELF_COEF * Δmy_path`. Enabled via `--reward-shaping`.
+- **Value head burn-in** — `--value-burnin-steps N --checkpoint path` freezes `actor_head.*` for N env steps. Only backbone + value head get gradients during burn-in.
+- **Randomized starting side** — `--randomize-start` has the bot move first 50% of episodes so the agent trains as both P0 and P1.
+- **Repetition penalty** — per-episode position visit tracking, `penalty = REPETITION_PENALTY * (visits - 1)`. Disable with `--repetition-penalty 0`.
+- **Opponent pool (Fictitious Self-Play)** — `--opponent mixed` samples HeuristicBot 40% / past self 60% per move.
+- **Entropy scheduling** — CLI-overridable with `--entropy-start` / `--entropy-end`.
 
 ---
 
@@ -222,50 +189,43 @@ QuoridorAI/
 ├── agents/                            ← agent implementations
 │   ├── __init__.py
 │   ├── bot.py                         ← HeuristicBot + EpsilonHeuristicBot (ε-greedy curriculum)
-│   ├── dqn_model.py                   ← CNN Q-network (DQN, 4-channel)
-│   ├── dqn_bot.py                     ← DQN agent wrapper
-│   ├── replay_buffer.py               ← experience replay buffer
 │   ├── random_bot.py                  ← random baseline agent
-│   ├── ppo_bot.py                     ← PPO checkpoint wrapper (for watch scripts / evaluation)
+│   ├── ppo_bot.py                     ← PPO checkpoint wrapper (for eval/play/watch)
 │   ├── ppo_model.py                   ← PPO baseline: 4-ch CNN + BatchNorm
 │   ├── ppo_model_resnet.py            ← PPO resnet: 4-ch ResNet + LayerNorm
 │   ├── ppo_model_bfs.py               ← PPO bfs: 6-ch CNN + LayerNorm (BFS channels)
 │   └── ppo_model_bfs_resnet.py        ← PPO bfs_resnet: 6-ch ResNet + LayerNorm + aux head (primary)
 │
 ├── scripts/                           ← runnable entry points
-│   ├── train_dqn.py                   ← DQN training loop (deprecated — moved to PPO)
 │   ├── train_ppo.py                   ← PPO training loop; --model selects architecture
-│   ├── watch_ppo.py                   ← terminal viewer: watch a PPO checkpoint play live
 │   ├── generate_bc_data.py            ← generate BC expert data (--bfs flag for 6-channel)
 │   ├── pretrain_bc.py                 ← BC pretraining; --model flag for all variants
-│   ├── play.py                        ← play interactively
-│   └── play_bot.py                    ← bot vs bot / human vs bot evaluation
+│   ├── play.py                        ← play interactively vs a bot
+│   ├── watch.py                       ← watch bot-vs-bot games in terminal
+│   ├── eval_bots.py                   ← batch evaluation (win rates, no visualization)
+│   └── opening_diversity.py           ← analyze opening sequence diversity
 │
 ├── checkpoints/                       ← saved model weights (untracked)
-│   ├── bc_pretrained.pt               ← 4-ch BC checkpoint; usable for baseline/resnet PPO only
-│   ├── bc_pretrained_bfs_resnet.pt    ← 6-ch BC checkpoint; 19 keys incl. actor_head — use this
-│   ├── best.pt                        ← best DQN checkpoint during training
-│   └── final_500000.pt                ← final DQN checkpoint (500k episodes, 0% vs heuristic)
 │
 ├── data/
 │   ├── bc_data.npz                    ← 4-channel BC dataset (untracked)
 │   └── bc_data_bfs.npz               ← 6-channel BC dataset (untracked)
 │
-├── tests/                             ← pytest suite (136 passing, 2 pre-existing DQN failures)
-│   ├── test_action_encoding.py
-│   ├── test_dqn_model.py
+├── tests/                             ← pytest suite (96 passing)
+│   ├── test_game.py
 │   ├── test_env.py
+│   ├── test_bfs_env.py
+│   ├── test_action_encoding.py
 │   ├── test_legal_mask.py
 │   ├── test_observation.py
-│   └── test_replay_buffer.py
+│   ├── test_bot_legality.py
+│   └── test_heuristic_bot_speed.py
 │
-└── plan/                              ← project docs
-    ├── plan.md
+└── docs/                              ← project documentation
+    ├── research.md                    ← RL theory primer (beginner-friendly)
     ├── decisions.md                   ← architectural decision log
-    ├── ppo_techniques.md              ← PPO implementation reference (aspirational — not all implemented)
-    ├── research.md                    ← research notes and paper summaries
-    ├── member_tracker.md
-    └── pytorch_curriculum.md          ← PyTorch learning plan
+    ├── ppo_techniques.md              ← PPO implementation reference
+    └── member_tracker.md              ← team contributions
 ```
 
 ### Key Entry Points
@@ -275,8 +235,9 @@ QuoridorAI/
 - **Vectorized env:** `quoridor/vec_env.py` — `VecQuoridorEnv(n_envs, bot, use_bfs, use_reward_shaping)`
 - **PPO training:** `scripts/train_ppo.py --model {baseline,resnet,bfs,bfs_resnet}`
 - **Model + env factory:** `train_ppo.py:build_model_and_env()` — always use this, never pair model and env manually
-- **Watch agent play:** `scripts/watch_ppo.py --checkpoint <path> --model bfs_resnet`
-- **Evaluation:** `scripts/play_bot.py` — run agent vs opponents
+- **Watch agent play:** `scripts/watch.py --checkpoint <path> --model bfs_resnet`
+- **Batch evaluation:** `scripts/eval_bots.py` — win rates without visualization
+- **Opening analysis:** `scripts/opening_diversity.py` — detect memorized gambits
 - **Config:** `config.py` — change hyperparameters here, nowhere else
 
 ---
@@ -295,9 +256,9 @@ QuoridorAI/
 
 | Phase | Graduate when... |
 |---|---|
-| DQN vs heuristic | ~~Win rate > 80% consistently~~ — abandoned; moved to PPO |
-| PPO self-play | Agent beats heuristic bot reliably (>80%); understand why PPO is more stable |
-| AlphaZero | Jeffrey has a solid grasp of MCTS; PPO agent is a strong baseline to beat |
+| ~~DQN~~ | ~~Abandoned — moved to PPO~~ |
+| PPO self-play | Agent beats heuristic bot reliably (>80%) from both sides |
+| AlphaZero | Solid grasp of MCTS; PPO agent is a strong baseline to beat |
 
 Do not rush to the next phase. Understanding the current phase deeply is the goal.
 
@@ -308,13 +269,13 @@ Do not rush to the next phase. Understanding the current phase deeply is the goa
 Before adding complexity, verify fundamentals:
 
 1. **Action masking correctness** — Are illegal actions truly never selected? Log action distributions.
-2. **State encoding fidelity** — Render a few states from the replay buffer and verify they match the board. Off-by-one errors in wall encoding are subtle and fatal.
+2. **State encoding fidelity** — Render a few states and verify they match the board. Off-by-one errors in wall encoding are subtle and fatal.
 3. **Reward signal** — Is the agent actually receiving +1/-1 at episode end? Log raw rewards.
 4. **Opponent characterization** — What strategy does the heuristic bot use? How many moves does it typically win in? You can't beat what you don't understand.
-5. **Q-value / entropy inspection** — Is entropy collapsing early? Are wall-placement logits systematically lower than move logits? This would explain wall avoidance.
+5. **Entropy inspection** — Is entropy collapsing early? Are wall-placement logits systematically lower than move logits? Check `train/wall_prob_mass`.
 6. **BFS channel sanity** — With `use_bfs=True`, verify ch4 goal row = 0.0 and ch5 reflects opponent distance correctly. A flipped perspective would silently train on wrong signal.
 7. **Approx KL in PPO** — Should stay below 0.05. Consistently higher means LR is too large or clip_eps needs reducing.
-8. **Exploration schedule** — Is epsilon (DQN) or entropy bonus (PPO) keeping enough exploration, or has it decayed too far?
+8. **Exploration schedule** — Is entropy bonus keeping enough exploration, or has it decayed too far? Beware catastrophic forgetting from too-aggressive exploration.
 
 ---
 
