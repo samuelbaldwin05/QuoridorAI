@@ -1,13 +1,6 @@
 """
 train_ppo.py — PPO training loop for the Quoridor agent.
 
-Why PPO over DQN for this problem?
-    DQN failed because sparse rewards (+1/-1 only) combined with a strong
-    heuristic opponent meant the agent almost never won, so Q-values collapsed
-    to a flat -1 fixed point and gradient signal disappeared. PPO avoids this
-    via entropy regularization: the policy is explicitly penalized for becoming
-    too deterministic, so it keeps exploring even when every observed outcome is -1.
-
 Algorithm (Schulman et al., 2017 — Proximal Policy Optimization):
     1. Collect ROLLOUT_STEPS transitions using the current policy π_θ.
        Store: spatial, scalars, legal_mask, action, log_prob, reward, done, value.
@@ -23,16 +16,10 @@ Algorithm (Schulman et al., 2017 — Proximal Policy Optimization):
          g. Gradient clip + Adam step.
     4. Discard rollout — PPO is on-policy, no replay buffer.
 
-BC warm-start:
-    Pass --checkpoint checkpoints/bc_pretrained.pt to load the CNN backbone
-    from BC pretraining. The actor and value heads are randomly initialized.
-    This gives PPO a 20% starting win rate against HeuristicBot (verified),
-    vs 0% cold start.
-
 Usage:
     python -m scripts.train_ppo                               # requires wandb login
     python -m scripts.train_ppo --no-wandb                   # dry run
-    python -m scripts.train_ppo --checkpoint checkpoints/bc_pretrained.pt
+    python -m scripts.train_ppo --checkpoint checkpoints/best_mixed-v2.pt
     python -m scripts.train_ppo --no-wandb --max-steps 1024  # smoke test (2 updates)
 """
 
@@ -48,7 +35,6 @@ import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 
 from agents.bot import EpsilonHeuristicBot, HeuristicBot
-from agents.random_bot import RandomBot
 from agents.ppo_model import PPOModel
 from agents.ppo_model_resnet import PPOModelResNet
 from agents.ppo_model_bfs import PPOModelBFS
@@ -85,7 +71,7 @@ from config import (
 )
 from quoridor.action_encoding import (
     index_to_action,
-    MOVE_ACTION_COUNT, H_WALL_OFFSET, V_WALL_OFFSET, PASS_ACTION,
+    H_WALL_OFFSET, V_WALL_OFFSET,
 )
 from quoridor.env import QuoridorEnv
 from quoridor.vec_env import VecQuoridorEnv
@@ -472,98 +458,6 @@ def build_model_and_env(
 # Rollout collection
 # ---------------------------------------------------------------------------
 
-def collect_rollout(
-    model: PPOModel,
-    env: QuoridorEnv,
-    rollout_steps: int,
-    device: torch.device,
-    spatial: np.ndarray,
-    scalars: np.ndarray,
-    temperature: float = 1.0,
-) -> tuple[dict, np.ndarray, np.ndarray, bool]:
-    """
-    Run the current policy for rollout_steps environment steps.
-
-    May span multiple episodes. Episode boundaries are tracked via the 'done'
-    flag — GAE resets the advantage accumulation at each terminal step.
-
-    Args:
-        model:         PPOModel in eval mode during collection.
-        env:           QuoridorEnv with bot opponent.
-        rollout_steps: Number of env steps to collect (ROLLOUT_STEPS).
-        device:        Torch device for inference.
-        spatial:       Current observation spatial component (carried across calls).
-        scalars:       Current observation scalars component (carried across calls).
-
-    Returns:
-        rollout:       Dict of tensors, each shape (T, ...).
-        next_spatial:  Observation after the final step (for GAE bootstrap).
-        next_scalars:  Scalars after the final step.
-        last_done:     True if the rollout ended on a terminal step.
-    """
-    spatials:    list = []
-    scalars_lst: list = []
-    legal_masks: list = []
-    actions:     list = []
-    log_probs:   list = []
-    rewards:     list = []
-    dones:       list = []
-    values:      list = []
-
-    model.eval()
-
-    for _ in range(rollout_steps):
-        legal_mask = env.get_legal_mask()
-
-        with torch.no_grad():
-            spatial_t = torch.tensor(spatial).unsqueeze(0).to(device)      # (1, 4, 9, 9)
-            scalars_t = torch.tensor(scalars).unsqueeze(0).to(device)      # (1, 2)
-            mask_t    = torch.tensor(legal_mask).unsqueeze(0).to(device)   # (1, 137)
-            dist, value, _aux = _model_forward(model, spatial_t, scalars_t, mask_t,
-                                                   temperature=temperature)
-            action    = dist.sample()                                       # (1,)
-            # Log-prob at T=1.0 so PPO ratios are unbiased by temperature.
-            if temperature != 1.0:
-                dist_base, _, _ = _model_forward(model, spatial_t, scalars_t, mask_t)
-                log_prob = dist_base.log_prob(action)                       # (1,)
-            else:
-                log_prob  = dist.log_prob(action)                           # (1,)
-
-        action_int = int(action.item())
-
-        next_spatial, next_scalars, reward, done, info = env.step(action_int)
-
-        # Record current step
-        spatials.append(spatial)
-        scalars_lst.append(scalars)
-        legal_masks.append(legal_mask)
-        actions.append(action_int)
-        log_probs.append(float(log_prob.item()))
-        rewards.append(float(reward))
-        dones.append(done)
-        values.append(float(value.item()))
-
-        if done:
-            # Reset env; next iteration starts a new episode
-            spatial, scalars = env.reset()
-        else:
-            spatial, scalars = next_spatial, next_scalars
-
-    # Stack all lists into tensors — shape (T, ...) for each field
-    rollout = {
-        "spatial":    torch.tensor(np.stack(spatials),    dtype=torch.float32).to(device),  # (T, 4, 9, 9)
-        "scalars":    torch.tensor(np.stack(scalars_lst), dtype=torch.float32).to(device),  # (T, 2)
-        "legal_mask": torch.tensor(np.stack(legal_masks), dtype=torch.bool).to(device),     # (T, 137)
-        "actions":    torch.tensor(actions,               dtype=torch.long).to(device),     # (T,)
-        "log_probs":  torch.tensor(log_probs,             dtype=torch.float32).to(device),  # (T,)
-        "rewards":    torch.tensor(rewards,               dtype=torch.float32).to(device),  # (T,)
-        "dones":      torch.tensor(dones,                 dtype=torch.bool).to(device),     # (T,)
-        "values":     torch.tensor(values,                dtype=torch.float32).to(device),  # (T,)
-    }
-
-    return rollout, spatial, scalars, dones[-1]
-
-
 def collect_rollout_vec(
     model:         torch.nn.Module,
     vec_env:       VecQuoridorEnv,
@@ -663,47 +557,6 @@ def collect_rollout_vec(
 # ---------------------------------------------------------------------------
 # Generalized Advantage Estimation
 # ---------------------------------------------------------------------------
-
-def compute_gae(
-    rewards:    torch.Tensor,  # (T,)
-    values:     torch.Tensor,  # (T,)
-    dones:      torch.Tensor,  # (T,) bool
-    last_value: torch.Tensor,  # scalar — V(s_{T+1}); 0 if last step was terminal
-    gamma:      float,
-    lam:        float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute Generalized Advantage Estimates (GAE, Schulman et al. 2016).
-
-    GAE smoothly interpolates between Monte Carlo (λ=1, low bias, high variance)
-    and TD(0) (λ=0, high bias, low variance). λ=0.95 sits close to MC, giving
-    accurate credit assignment for Quoridor's long-horizon rewards.
-
-    For each step t (walking backwards):
-        delta_t = r_t + γ * V(s_{t+1}) * (1-done_t) - V(s_t)
-        A_t     = delta_t + γ * λ * (1-done_t) * A_{t+1}
-
-    The (1-done_t) term zeros out both the bootstrap value and the carry-over
-    advantage at episode boundaries, so credit never bleeds between episodes.
-
-    Returns:
-        advantages : (T,) — not yet normalised (normalisation is per-mini-batch)
-        returns    : (T,) — advantages + values; used as value-head targets
-    """
-    T          = rewards.shape[0]
-    advantages = torch.zeros(T, device=rewards.device)
-    gae        = 0.0
-
-    for t in reversed(range(T)):
-        not_done = 1.0 - float(dones[t])
-        next_val = float(values[t + 1]) if t < T - 1 else float(last_value)
-        delta    = float(rewards[t]) + gamma * next_val * not_done - float(values[t])
-        gae      = delta + gamma * lam * not_done * gae
-        advantages[t] = gae
-
-    returns = advantages + values  # (T,) — value-head training targets
-    return advantages, returns
-
 
 def compute_gae_vec(
     rewards:     torch.Tensor,  # (T, N)
