@@ -23,6 +23,8 @@
 
 ## Dreshta Boghra
 - Catching up on machine learning fundamentals
+- Ran DQN training vs HeuristicBot on Google Colab GPU, Michael achieved higher win rates in parallel so continued from his best checkpoint
+- Ran PPO training from Michael's best checkpoint, identified entropy collapse issue from random actor head initialization when loading DQN checkpoint into PPO
 
 ## Current status
 - DQN training vs RandomBot in progress (target: 80% win rate to graduate)
