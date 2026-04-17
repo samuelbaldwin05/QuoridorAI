@@ -1467,7 +1467,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="baseline",
+        default="bfs_resnet",
         choices=["baseline", "resnet", "bfs", "bfs_resnet"],
         help=(
             "Model architecture to train. "

@@ -1,5 +1,5 @@
 """
-watch_ppo.py — Watch a trained PPO agent play Quoridor in the terminal.
+watch.py — Watch a trained PPO agent play Quoridor in the terminal.
 
 Loads a checkpoint, plays one or more complete games against a chosen
 opponent, and renders each board state with a configurable delay. Useful
@@ -7,10 +7,10 @@ for quickly eyeballing whether the agent plays sensibly — does it advance
 its pawn? Does it place walls that actually obstruct the opponent?
 
 Usage:
-    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt
-    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt --model bfs_resnet
-    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt --games 3 --delay 0.5
-    python -m scripts.watch_ppo --checkpoint checkpoints/ppo_best.pt --opponent random --no-greedy
+    python -m scripts.watch --checkpoint checkpoints/best_mixed-v2.pt
+    python -m scripts.watch --checkpoint checkpoints/best_mixed-v2.pt --model bfs_resnet
+    python -m scripts.watch --checkpoint checkpoints/best_mixed-v2.pt --games 3 --delay 0.5
+    python -m scripts.watch --checkpoint checkpoints/best_mixed-v2.pt --opponent random --no-greedy
 """
 
 import argparse
@@ -23,7 +23,7 @@ from quoridor.display import render
 from quoridor.game import QuoridorState
 
 
-MAX_PLIES = 300  # match env.py move limit
+MAX_PLIES = 100  # match env.py move limit
 
 
 def play_game(
@@ -110,7 +110,7 @@ def main() -> None:
         help="Model architecture for the PPO opponent — must match its checkpoint",
     )
     parser.add_argument(
-        "--games", type=int, default=5,
+        "--games", type=int, default=2,
         help="Number of games to play",
     )
     parser.add_argument(
