@@ -269,16 +269,6 @@ class HeuristicBot:
 
         return fences
 
-    def _all_valid_fences(self, game):
-        """Every legal fence placement on the board."""
-        fences = []
-        for row in range(FENCE_GRID):
-            for col in range(FENCE_GRID):
-                for orientation in ("h", "v"):
-                    if game._fence_ok(row, col, orientation):
-                        fences.append((row, col, orientation))
-        return fences
-
     # ── uniform cost search ─────────────────────────────────────
 
     def _ucs_best_move(self, game):
@@ -482,31 +472,6 @@ class HeuristicBot:
 
         return grid
 
-    def _fence_penalty(self, game, row, col):
-        """Penalty for a square based on distance to nearest fence.
-        Encourages paths through open space when distances are equal.
-        """
-        if game.fences_count() == 0:
-            return 0.0
-
-        min_dist = self._min_fence_distance(game, row, col)
-        return FENCE_PENALTIES.get(min_dist, 0.0)
-
-    def _min_fence_distance(self, game, row, col):
-        """Manhattan distance from (row, col) to nearest fence-affected square."""
-        best = float("inf")
-
-        for fr in range(FENCE_GRID):
-            for fc in range(FENCE_GRID):
-                if game.h_walls[fr, fc]:
-                    for ar, ac in self._fence_squares(fr, fc):
-                        best = min(best, abs(row - ar) + abs(col - ac))
-                if game.v_walls[fr, fc]:
-                    for ar, ac in self._fence_squares(fr, fc):
-                        best = min(best, abs(row - ar) + abs(col - ac))
-
-        return best
-
     @staticmethod
     def _fence_squares(fr, fc) -> list[tuple[int, int]]:
         """The four board squares a fence at grid position (fr, fc) touches."""
@@ -545,7 +510,7 @@ class EpsilonHeuristicBot:
         as the agent's rolling win rate approaches EPSILON_CURRICULUM_THRESHOLD.
     """
 
-    def __init__(self, epsilon: float = 0.3) -> None:
+    def __init__(self, epsilon: float = 0.0) -> None:
         self._heuristic = HeuristicBot()
         self.epsilon    = epsilon  # mutable — updated in-place by training loop
 
