@@ -22,8 +22,9 @@
 - Ran initial training vs RandomBot — early results: ~60% win rate by step 4k, training ongoing
 
 ## Dreshta Boghra
-- Catching up on machine learning fundamentals
-- Ran DQN training vs HeuristicBot on Google Colab GPU, Michael achieved higher win rates in parallel so continued from his best checkpoint
+- Caught up on ML and RL fundamentals (Q-values, Bellman equation, CNNs, state encoding, action space)
+- Researched self-play training strategies: frozen opponent methodology, win-rate-driven epsilon annealing, and league play
+- Ran DQN training vs HeuristicBot on Google Colab GPU
 - Ran PPO training from Michael's best checkpoint, identified entropy collapse issue from random actor head initialization when loading DQN checkpoint into PPO
 
 ## Current status
