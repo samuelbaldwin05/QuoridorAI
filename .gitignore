@@ -21,3 +21,6 @@ data/
 # experiment logs
 wandb/
 logs/
+
+# local claude settings
+.claude/settings.local.json
