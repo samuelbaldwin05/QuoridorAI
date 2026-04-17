@@ -1,9 +1,7 @@
 import numpy as np
 from collections import deque
 
-
-BOARD_SIZE = 9
-FENCE_GRID = BOARD_SIZE - 1 # 8x8 grid
+from config import BOARD_SIZE, FENCE_GRID, INITIAL_WALLS_PER_PLAYER, BFS_NORM_FACTOR
 
 
 class QuoridorState:
@@ -21,7 +19,7 @@ class QuoridorState:
         # Player 1: starts top center (row 0), goal is bottom (row 8)
         self.pos = np.array([[8, 4], [0, 4]], dtype=np.int8)
         self.goals = np.array([0, 8], dtype=np.int8)
-        self.walls_left = np.array([10, 10], dtype=np.int8)
+        self.walls_left = np.array([INITIAL_WALLS_PER_PLAYER, INITIAL_WALLS_PER_PLAYER], dtype=np.int8)
 
         # fence grids: True where a fence has been placed
         self.h_walls = np.zeros((FENCE_GRID, FENCE_GRID), dtype=np.bool_)
@@ -216,6 +214,60 @@ class QuoridorState:
 
         return float("inf")
 
+    def bfs_distance_map(self, player: int) -> np.ndarray:
+        """
+        Compute a full 9×9 BFS distance map for a player.
+
+        Each cell (r, c) contains the minimum number of steps to reach the
+        player's goal row from that position, given the current wall layout.
+        Unreachable cells are assigned a distance of 1.0 (the normalised max).
+
+        Uses reverse multi-source BFS: start simultaneously from every cell on
+        the goal row (distance 0) and expand outward. One BFS pass fills the
+        entire board, which is more efficient than running a separate forward BFS
+        from each cell individually.
+
+        The same _blocked() and _in_bounds() helpers used by shortest_path() are
+        reused here, so wall semantics are guaranteed to be consistent.
+
+        Returns
+        -------
+        dist_map : np.ndarray, shape (9, 9), dtype float32
+            Values in [0, 1], normalised by BFS_NORM_FACTOR (= BOARD_SIZE * 2 = 18).
+        """
+        goal_row = int(self.goals[player])
+        dist = np.full((BOARD_SIZE, BOARD_SIZE), BFS_NORM_FACTOR, dtype=np.float32)
+
+        # Seed the BFS with all cells on the goal row at distance 0.
+        queue: deque = deque()
+        for c in range(BOARD_SIZE):
+            dist[goal_row, c] = 0.0
+            queue.append((goal_row, c))
+
+        # Expand outward. We move BACKWARDS through the board (from goal to
+        # source), so the direction of travel is reversed relative to how a
+        # player would actually walk. The wall blocking check must therefore
+        # be applied as if stepping FROM the neighbour TO the current cell,
+        # because _blocked(r1,c1,r2,c2) checks the wall between r1,c1→r2,c2.
+        while queue:
+            cr, cc = queue.popleft()
+            for dr, dc in self.DIRECTIONS:
+                nr, nc = cr + dr, cc + dc
+                if not self._in_bounds(nr, nc):
+                    continue
+                # Check whether a player at (nr, nc) can step to (cr, cc).
+                # _blocked is symmetric for orthogonal steps, so this is correct.
+                if self._blocked(nr, nc, cr, cc):
+                    continue
+                new_dist = dist[cr, cc] + 1.0
+                if new_dist < dist[nr, nc]:
+                    dist[nr, nc] = new_dist
+                    queue.append((nr, nc))
+
+        # Normalise to [0, 1]. Cells that remained at BFS_NORM_FACTOR normalise
+        # to 1.0, which correctly signals "far from goal / possibly cut off".
+        return dist / BFS_NORM_FACTOR
+
     def _has_path(self, player):
         """Whether a player can reach their goal row."""
         return self.shortest_path(player) < float("inf")
@@ -244,23 +296,39 @@ class QuoridorState:
 
     # OBSERVATION AND LEGAL MASK
 
-    def get_observation(self) -> tuple[np.ndarray, np.ndarray]:
+    def get_observation(self, use_bfs: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """
         Encode the current state as a (spatial, scalars) pair for the neural network.
 
+        Parameters
+        ----------
+        use_bfs : bool, default False
+            When True, two additional BFS distance map channels are appended:
+              ch4 : current player's BFS distance map (normalised, goal row = 0)
+              ch5 : opponent's BFS distance map (normalised, goal row = 0)
+            Returns spatial shape (6, 9, 9) instead of (4, 9, 9).
+            The same perspective flip applied to pawn/wall channels is applied
+            to the BFS maps so the observation is always from the current player's POV.
+
         Returns
         -------
-        spatial : np.ndarray, shape (4, 9, 9), dtype float32
-            Four 9×9 channels describing the board (see channel layout below).
+        spatial : np.ndarray, shape (4, 9, 9) or (6, 9, 9), dtype float32
+            Board channels (see channel layout below).
         scalars : np.ndarray, shape (2,), dtype float32
             Normalised wall counts: [current_player_walls / 10, opponent_walls / 10].
 
-        Channel layout
-        --------------
+        Channel layout (base 4 channels)
+        ---------------------------------
         ch0 : current player pawn position (single 1.0)
         ch1 : opponent pawn position (single 1.0)
         ch2 : horizontal wall grid (8×8 in top-left of 9×9, rest 0)
         ch3 : vertical wall grid  (8×8 in top-left of 9×9, rest 0)
+
+        Additional channels when use_bfs=True
+        --------------------------------------
+        ch4 : current player BFS distance map — each cell holds normalised steps
+              to goal from that position; goal row = 0.0, further = higher value.
+        ch5 : opponent BFS distance map (same encoding, same perspective flip).
 
         Perspective normalisation
         -------------------------
@@ -274,7 +342,8 @@ class QuoridorState:
         opponent = 1 - current
         flip = (current == 1)
 
-        spatial = np.zeros((4, 9, 9), dtype=np.float32)  # (4, 9, 9)
+        n_channels = 6 if use_bfs else 4
+        spatial = np.zeros((n_channels, 9, 9), dtype=np.float32)
 
         cur_r, cur_c = int(self.pos[current, 0]), int(self.pos[current, 1])
         opp_r, opp_c = int(self.pos[opponent, 0]), int(self.pos[opponent, 1])
@@ -295,9 +364,23 @@ class QuoridorState:
         spatial[2, :8, :8] = h  # embed 8×8 in top-left of 9×9
         spatial[3, :8, :8] = v
 
+        if use_bfs:
+            # Compute full-board BFS distance maps for both players.
+            # bfs_distance_map() uses the actual game state (walls, positions) so
+            # it correctly reflects the current strategic situation for each player.
+            cur_dist = self.bfs_distance_map(current)   # (9, 9)
+            opp_dist = self.bfs_distance_map(opponent)  # (9, 9)
+            if flip:
+                # Apply the same vertical flip as pawn/wall channels so ch4/ch5
+                # are always oriented from the current player's perspective.
+                cur_dist = np.flipud(cur_dist)
+                opp_dist = np.flipud(opp_dist)
+            spatial[4] = cur_dist  # ch4: my distance to goal
+            spatial[5] = opp_dist  # ch5: opponent's distance to goal
+
         scalars = np.array([
-            self.walls_left[current] / 10.0,
-            self.walls_left[opponent] / 10.0,
+            self.walls_left[current] / INITIAL_WALLS_PER_PLAYER,
+            self.walls_left[opponent] / INITIAL_WALLS_PER_PLAYER,
         ], dtype=np.float32)  # (2,)
 
         return spatial, scalars

@@ -9,3 +9,18 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+.env
+
+# testing
+.pytest_cache/
+
+# model checkpoints and datasets (large binaries — transfer manually)
+checkpoints/
+data/
+
+# experiment logs
+wandb/
+logs/
+
+# local claude settings
+.claude/settings.local.json

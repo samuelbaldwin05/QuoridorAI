@@ -21,7 +21,22 @@ V_WALL_OFFSET: int = 72
 PASS_ACTION: int = 136
 FENCE_GRID: int = 8
 
-# index -> (row_delta, col_delta)
+# Fundamental constants: import from config so this module stays in sync
+# if board dimensions or the action space ever change.
+from config import NUM_ACTIONS, FENCE_GRID
+
+MOVE_ACTION_COUNT: int = 8      # pawn move actions (cardinal + diagonal)
+# Derived offsets — computed from the fundamental constants above so they
+# never drift out of sync with NUM_ACTIONS or FENCE_GRID.
+H_WALL_OFFSET: int = MOVE_ACTION_COUNT                          # first h-wall index = 8
+V_WALL_OFFSET: int = H_WALL_OFFSET + FENCE_GRID * FENCE_GRID   # first v-wall index = 72
+PASS_ACTION: int   = V_WALL_OFFSET + FENCE_GRID * FENCE_GRID   # pass index = 136
+
+# Maps pawn action index (0–7) to (row_delta, col_delta).
+# Cardinal entries (0–3) encode *direction*: the env wrapper matches any
+# destination that is in this direction relative to the current pawn position.
+# Diagonal entries (4–7) encode exact one-step diagonal offsets; these only
+# arise during jump situations when a straight jump is wall-blocked.
 PAWN_DELTAS: dict[int, tuple[int, int]] = {
     0: (-1,  0),   # up
     1: (+1,  0),   # down
