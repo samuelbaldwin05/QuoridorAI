@@ -4,6 +4,7 @@
 - Built core game engine (`quoridor/game.py`) — movement, fencing, pathfinding, win detection
 - Built heuristic bot (`agents/bot.py`) — priority chain: opening book, win-in-one, fence heuristics, UCS movement
 - Built display module (`quoridor/display.py`) and play scripts (`scripts/play.py`, `scripts/play_bot.py`)
+- Reviewed and discussed changes for written code, cleaned up repo
 
 ## Jeff Krapf — completed 2026-03-23
 - Built action encoding (`quoridor/action_encoding.py`) — 137-action bijection
